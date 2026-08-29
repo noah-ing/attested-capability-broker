@@ -1,0 +1,45 @@
+name: attested-capability-broker
+
+services:
+  swtpm:
+    build:
+      context: .
+    command: ["./scripts/run-swtpm.sh"]
+    expose:
+      - "2321"
+      - "2322"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; socket.create_connection(('127.0.0.1', 2321), timeout=1).close()"
+      interval: 1s
+      timeout: 2s
+      retries: 20
+      start_period: 2s
+    tmpfs:
+      - /var/lib/atcap-swtpm:mode=0700
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  verify:
+    build:
+      context: .
+    depends_on:
+      swtpm:
+        condition: service_healthy
+    environment:
+      ATCAP_SWTPM_TCTI: swtpm:host=swtpm,port=2321
+      TPM2TOOLS_TCTI: swtpm:host=swtpm,port=2321
+    command: ["./scripts/container-smoke.sh"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+networks:
+  default:
+    internal: true

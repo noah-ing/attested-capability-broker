@@ -1,0 +1,117 @@
+[build-system]
+requires = ["hatchling==1.32.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "attested-capability-broker"
+version = "0.1.0"
+description = "Independent verification harness for a TPM-appraised MCP capability flow"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Noah Ingwers" }]
+keywords = ["agent-security", "agentrust", "attestation", "ca2a", "mcp", "tpm"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security",
+]
+dependencies = [
+  "agent-manifest==0.11.2",
+  "ca2a-runtime==0.2.0",
+  "cryptography==50.0.1",
+  "joserfc==1.7.5",
+  "mcp==2.1.1",
+  "pydantic==2.13.5",
+  "rfc8785==0.1.4",
+  "tpm2-pytss==3.0.0; sys_platform == 'linux'",
+]
+
+[project.optional-dependencies]
+dev = [
+  "bandit==1.9.4",
+  "build==1.6.0",
+  "coverage==7.16.0",
+  "detect-secrets==1.5.0",
+  "hatchling==1.32.0",
+  "mypy==2.3.1",
+  "pip-audit==2.10.1",
+  "pytest==9.1.1",
+  "pytest-asyncio==1.4.0",
+  "ruff==0.16.5",
+]
+
+[project.urls]
+Repository = "https://github.com/noah-ing/attested-capability-broker"
+Issues = "https://github.com/noah-ing/attested-capability-broker/issues"
+
+[tool.hatch.build]
+exclude = [
+  "/.env",
+  "/.env.*",
+  "/artifacts",
+  "/evidence",
+  "/logs",
+  "/run",
+  "/private",
+  "*.log",
+  "*.db",
+  "*.db-*",
+  "*.sqlite",
+  "*.sqlite-*",
+  "*.sqlite3",
+  "*.sqlite3-*",
+  "/.coverage",
+  "/.coverage.*",
+  "/coverage.xml",
+  "/htmlcov",
+  "/pytest.xml",
+  "/junit*.xml",
+  "/*-pytest.xml",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/.dockerignore",
+  "/Dockerfile",
+  "/LICENSE",
+  "/README.md",
+  "/SECURITY.md",
+  "/compose.yaml",
+  "/docs",
+  "/pyproject.toml",
+  "/scripts",
+  "/src",
+  "/tests",
+  "/uv.lock",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/atcap"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+  "swtpm: requires Linux swtpm and tpm2-tools",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "ASYNC", "RUF"]
+ignore = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+files = ["src/atcap"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
