@@ -10,9 +10,9 @@ commands actually run against that checkout.
 ```text
  UNTRUSTED / CLAIMED INPUTS                         CONFIGURED TRUST
  ┌──────────────────────────────┐                  ┌──────────────────────────┐
- │ signed manifest             │                  │ manifest signer + digest │
- │ identity-endorsed request   │                  │ authorized identity key  │
- │ TPM quote + synthetic chain │                  │ TPM/AK root + cert/PCR   │
+ │ signed manifest              │                  │ manifest signer + digest │
+ │ identity-endorsed request    │                  │ authorized identity key  │
+ │ TPM quote + synthetic chain  │                  │ TPM/AK root + cert/PCR   │
  └──────────────┬───────────────┘                  │ policy; issuer key/kid   │
                 │                                  └─────────────┬────────────┘
                 v                                                │
@@ -22,14 +22,14 @@ commands actually run against that checkout.
  │              SQLite BEGIN IMMEDIATE: recheck time, consume challenge       │
  │                                  |                                         │
  │ issue signed, bounded cA2A credential under inventoryd-specific issuer     │
- │ sign canonical broker decision receipt                                    │
+ │ sign canonical broker decision receipt                                     │
  └──────────────────────────────────┬─────────────────────────────────────────┘
                                     │ credential
                                     v
  UNTRUSTED MCP CALLER             CONFIGURED RESOURCE TRUST
  ┌──────────────────────────┐     ┌───────────────────────────────────────────┐
- │ credential + proof       │     │ broker public key; exact scope/audience  │
- │ sku + record ID          │     │ receipt verification key; clocks/policy  │
+ │ credential + proof       │     │ broker public key; exact scope/audience   │
+ │ sku + record ID          │     │ receipt verification key; clocks/policy   │
  └─────────────┬────────────┘     └───────────────────┬───────────────────────┘
                v                                      v
  ┌────────────────── INVENTORYD TRUST BOUNDARY ───────────────────────────────┐
@@ -38,11 +38,11 @@ commands actually run against that checkout.
  │  lookup: verify root, scope, bounds, lifetime, stored context, holder proof│
  │                     |                                                      │
  │  SQLite BEGIN IMMEDIATE: recheck time, consume challenge, insert spend     │
- │                     | commit before invocation                            │
+ │                     | commit before invocation                             │
  │                     v                                                      │
- │              private `_inventory_lookup` handler                          │
+ │              private `_inventory_lookup` handler                           │
  │                     |                                                      │
- │              signed canonical decision receipt                            │
+ │              signed canonical decision receipt                             │
  └────────────────────────────────────────────────────────────────────────────┘
 ```
 
