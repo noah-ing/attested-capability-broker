@@ -247,12 +247,15 @@ The script does not inspect, move, overwrite, or delete any other contents.
 Source, tests, and the core clean-container path do not depend on the evidence
 drive.
 
-The dedicated directory contains current pricing/type snapshots, the image
-manifest, closed template/endpoint validation projections, local-controller
-output, the canonical `experiment-record.json`, compact
-`experiment-record.jws`, public-only `experiment-verifier.json`, a bounded
-billing observation, cleanup logs/status, `SHA256SUMS`, and
-`verification-manifest.json`. Resource IDs in those projections are SHA-256
+After successful finalization, the dedicated directory contains current
+pricing/type snapshots, the image manifest, closed template/endpoint validation
+projections, local-controller output, the canonical `experiment-record.json`,
+compact `experiment-record.jws`, public-only `experiment-verifier.json`, a
+bounded billing observation, cleanup logs/status, `SHA256SUMS`, and
+`verification-manifest.json`. A failed, interrupted, or timed-out run may leave
+only a checksummed subset of diagnostic and cleanup evidence; it does not
+contain the experiment record, its JWS, or the verifier unless finalization
+actually completed. Resource IDs in the provider projections are SHA-256
 digests. The projections contain the local expected configuration plus closed,
 explicit provider observations such as the composed read-back sources, generic
 GPU count, omitted REST compute fields, default ports, and start flags; they do
