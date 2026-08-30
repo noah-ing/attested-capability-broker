@@ -33,6 +33,7 @@ services:
         condition: service_healthy
     environment:
       ATCAP_SWTPM_TCTI: swtpm:host=swtpm,port=2321
+      ATCAP_LAB_COMMIT_SHA: ${ATCAP_LAB_COMMIT_SHA:-0000000000000000000000000000000000000000}
       TPM2TOOLS_TCTI: swtpm:host=swtpm,port=2321
     command: ["./scripts/container-smoke.sh"]
     security_opt:

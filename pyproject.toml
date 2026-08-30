@@ -81,6 +81,7 @@ include = [
   "/SECURITY.md",
   "/compose.yaml",
   "/docs",
+  "/examples/runpod-untrusted-caller",
   "/pyproject.toml",
   "/scripts",
   "/src",

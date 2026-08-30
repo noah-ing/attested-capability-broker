@@ -39,11 +39,65 @@ ROOT_SDIST_FILES = {
 }
 DOC_SDIST_FILES = {"docs/audit-guide.md", "docs/threat-model.md"}
 SCRIPT_SDIST_FILES = {
+    "examples/runpod-untrusted-caller/scripts/run-live.sh",
     "scripts/container-smoke.sh",
     "scripts/run-swtpm.sh",
     "scripts/verify-coverage.sh",
     "scripts/verify-package.py",
 }
+EXAMPLE_ROOT_FILES = {
+    ".dockerignore",
+    "Dockerfile",
+    "README.md",
+    "billing_observation.py",
+    "bounded_capture.py",
+    "deadline_supervisor.py",
+    "evidence_manifest.py",
+    "handler.py",
+    "handler_self_test.py",
+    "lab_test_support.py",
+    "provider_readback.py",
+    "requirements.in",
+    "requirements.lock",
+    "self_test.py",
+}
+EXAMPLE_LAB_FILES = {
+    "__init__.py",
+    "controller.py",
+    "errors.py",
+    "live_cli.py",
+    "record.py",
+    "swtpm.py",
+    "transport.py",
+    "wire.py",
+    "worker.py",
+    "worker_wire.py",
+}
+EXAMPLE_TEST_FILES = {
+    "conftest.py",
+    "test_billing_observation.py",
+    "test_bounded_capture.py",
+    "test_controller.py",
+    "test_deadline_supervisor.py",
+    "test_evidence_manifest.py",
+    "test_live_cli.py",
+    "test_provider_readback.py",
+    "test_real_swtpm_lab.py",
+    "test_record.py",
+    "test_run_live_script.py",
+}
+EXAMPLE_FIXTURE_FILES = {
+    "runpodctl-2.12-endpoint-get.json",
+    "runpodctl-2.12-template-get.json",
+}
+EXAMPLE_PREFIX = "examples/runpod-untrusted-caller"
+EXAMPLE_SDIST_FILES = (
+    {f"{EXAMPLE_PREFIX}/{name}" for name in EXAMPLE_ROOT_FILES}
+    | {f"{EXAMPLE_PREFIX}/lab/{name}" for name in EXAMPLE_LAB_FILES}
+    | {f"{EXAMPLE_PREFIX}/tests/{name}" for name in EXAMPLE_TEST_FILES}
+    | {f"{EXAMPLE_PREFIX}/tests/fixtures/{name}" for name in EXAMPLE_FIXTURE_FILES}
+    | {f"{EXAMPLE_PREFIX}/scripts/run-live.sh"}
+)
 FORBIDDEN_PARTS = {
     ".git",
     ".github",
@@ -281,7 +335,14 @@ def _source_distribution_allowlist(root: Path) -> set[str]:
     }
     _require(source_files, "source allowlist is unexpectedly empty")
     _require(test_files, "test allowlist is unexpectedly empty")
-    return ROOT_SDIST_FILES | DOC_SDIST_FILES | SCRIPT_SDIST_FILES | source_files | test_files
+    return (
+        ROOT_SDIST_FILES
+        | DOC_SDIST_FILES
+        | SCRIPT_SDIST_FILES
+        | EXAMPLE_SDIST_FILES
+        | source_files
+        | test_files
+    )
 
 
 def _is_forbidden(path: PurePosixPath) -> bool:

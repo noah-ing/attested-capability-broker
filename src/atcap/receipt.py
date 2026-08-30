@@ -140,6 +140,11 @@ class ReceiptVerifier:
         self._public_key = public_key
         self.key_id = key_id
 
+    def public_jwk(self) -> dict[str, Any]:
+        """Return the configured public-only JWK for audit tooling."""
+
+        return self._public_key.as_dict(private=False)
+
     def verify(self, signed_receipt: SignedDecisionReceipt) -> DecisionReceiptPayload:
         expected = {"alg": JWS_ALGORITHM, "kid": self.key_id, "typ": JWS_TYPE}
         try:

@@ -1,0 +1,11 @@
+*
+!Dockerfile
+!handler.py
+!handler_self_test.py
+!self_test.py
+!requirements.lock
+!lab/
+!lab/__init__.py
+!lab/errors.py
+!lab/worker.py
+!lab/worker_wire.py

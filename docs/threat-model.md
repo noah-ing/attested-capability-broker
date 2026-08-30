@@ -270,4 +270,7 @@ to its trust domain.
 
 The reference Compose topology is a verification environment, publishes no
 simulator port, and uses one disposable `swtpm` instance. It is not a production
-network or deployment model and provisions no external service.
+network or deployment model and provisions no external service. The isolated
+[Runpod example](../examples/runpod-untrusted-caller/README.md) is outside this
+core assurance claim and treats its remote host, control plane, queue, worker,
+registry metadata, and output as untrusted.
