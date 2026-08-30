@@ -1,6 +1,5 @@
 .git
 .github
-.dockerignore
 .DS_Store
 ._*
 .idea

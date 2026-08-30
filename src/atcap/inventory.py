@@ -64,6 +64,34 @@ class LookupInput(InventoryArguments):
     record_id: str = Field(min_length=1, max_length=256)
 
 
+class InventoryLookupResult(BaseModel):
+    """Closed, JSON-safe result emitted after one authenticated invocation."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    sku: str = Field(min_length=1, max_length=128)
+    quantity: int = Field(ge=0)
+    invocation_number: int = Field(ge=1)
+
+
+class UnsignedPostInvocationState(BaseModel):
+    """Closed MCP error state used only when post-invocation receipt signing fails."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    schema_version: Literal["atcap-unsigned-post-invocation/v1"] = (
+        "atcap-unsigned-post-invocation/v1"
+    )
+    error_code: Literal["POST_INVOCATION_RECEIPT_UNAVAILABLE"] = (
+        "POST_INVOCATION_RECEIPT_UNAVAILABLE"
+    )
+    receipt_status: Literal["UNSIGNED"] = "UNSIGNED"
+    credential_spent: Literal[True] = True
+    handler_invoked: Literal[True] = True
+    handler_completed: bool
+    invocation_id: int = Field(ge=1)
+
+
 class InventoryApplication:
     """The only path to the private inventory lookup handler."""
 
@@ -302,7 +330,10 @@ class InventoryApplication:
 
         invocation_number = self._record_invocation()
         try:
-            result = self._inventory_lookup(business_arguments)
+            raw_result = self._inventory_lookup(business_arguments)
+            result = InventoryLookupResult.model_validate(
+                {**raw_result, "invocation_number": invocation_number}
+            ).model_dump(mode="json")
         except Exception:
             try:
                 receipt = self._receipt(
@@ -333,7 +364,6 @@ class InventoryApplication:
                 },
             )
 
-        result["invocation_number"] = invocation_number
         try:
             receipt = self._receipt(
                 decision="allow",
@@ -475,7 +505,17 @@ class InventoryApplication:
             except ValidationError:
                 decision = self.direct_lookup_attempt(dict(raw_arguments))
                 return self._mcp_result(decision.to_dict(), is_error=True)
-            decision = await asyncio.to_thread(self.redeem, lookup_request)
+            try:
+                decision = await asyncio.to_thread(self.redeem, lookup_request)
+            except PostInvocationError as exc:
+                unsigned_state = UnsignedPostInvocationState(
+                    handler_completed=exc.completed,
+                    invocation_id=exc.invocation_id,
+                )
+                return self._mcp_result(
+                    unsigned_state.model_dump(mode="json"),
+                    is_error=True,
+                )
             return self._mcp_result(
                 decision.to_dict(),
                 is_error=not decision.allowed or decision.reason == Reason.HANDLER_FAILED,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import secrets
 import sqlite3
 import threading
@@ -19,6 +20,7 @@ from ca2a_runtime.delegation import (
 from ca2a_runtime.delegation.holder import proof_body
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import atcap.inventory as inventory_module
 from atcap.broker import credential_to_dict
 from atcap.canonical import canonical_digest, canonical_json, challenge_token_hash
 from atcap.errors import PostInvocationError, Reason
@@ -322,6 +324,79 @@ def test_resource_challenge_rejects_argument_or_record_substitution(
     assert decision.reason == Reason.HOLDER_PROOF_INVALID
     assert harness.inventory.invocation_count == 0
     assert harness.store.redemption_count(credential.credential_id) == 0
+
+
+@pytest.mark.parametrize("failure_stage", ["holder-proof-verifier", "atomic-spend"])
+def test_unexpected_authorization_failure_is_signed_fail_closed_and_does_not_leak(
+    failure_stage: str,
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credential, _ = harness.issue_credential()
+    challenge, request = harness.lookup_request(
+        credential,
+        record_id=f"internal-error-{failure_stage}",
+    )
+    exception_marker = "authorization dependency exposed raw secrets"
+    handler_called = False
+
+    def fail_authorization(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError(exception_marker)
+
+    def forbidden_handler(_arguments: object) -> dict[str, Any]:
+        nonlocal handler_called
+        handler_called = True
+        return {"should": "not execute"}
+
+    monkeypatch.setattr(harness.inventory, "_inventory_lookup", forbidden_handler)
+    if failure_stage == "holder-proof-verifier":
+        monkeypatch.setattr(inventory_module, "verify_holder_proof", fail_authorization)
+    else:
+        monkeypatch.setattr(
+            harness.store,
+            "consume_challenge_and_spend_credential",
+            fail_authorization,
+        )
+
+    decision = harness.inventory.redeem(request)
+
+    assert decision.allowed is False
+    assert decision.reason == Reason.INTERNAL_ERROR
+    assert decision.result is None
+    assert handler_called is False
+    assert harness.inventory.invocation_count == 0
+    assert harness.store.redemption_count(credential.credential_id) == 0
+    stored = harness.store.get_resource_challenge(challenge_token_hash(challenge.token))
+    assert stored is not None
+    assert stored.consumed_at is None
+    payload = harness.inventory_receipts.verify(decision.receipt)
+    assert payload.decision == "deny"
+    assert payload.reason == Reason.INTERNAL_ERROR
+    assert payload.credential_id == credential.credential_id
+    assert payload.challenge_token_hash == challenge_token_hash(challenge.token)
+    assert payload.invocation_id is None
+    assert payload.handler_count_snapshot == 0
+    assert payload.handler_invoked is False
+    assert payload.business_result == "not_invoked"
+
+    exposed = json.dumps(decision.to_dict(), sort_keys=True) + payload.model_dump_json()
+    private_markers = (
+        exception_marker,
+        challenge.token,
+        request.holder_proof["signature"],
+        request.credential["signature"],
+        credential.subject,
+        credential.issuer,
+        harness.inventory.challenge_secret.hex(),
+        harness.holder_private.private_bytes_raw().hex(),
+        harness.broker_issuer_private.private_bytes_raw().hex(),
+        str(harness.manifest["manifest_id"]),
+        harness.accepted_evidence.attest.hex(),
+        harness.accepted_evidence.signature.hex(),
+        harness.accepted_evidence.ak_chain_pem.decode(),
+    )
+    assert all(marker not in exposed for marker in private_markers)
 
 
 def test_stale_resource_challenge_is_denied(harness: Harness) -> None:

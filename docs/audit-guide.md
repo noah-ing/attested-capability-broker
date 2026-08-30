@@ -110,7 +110,11 @@ The relevant dependencies are exact-pinned in `pyproject.toml` and resolved in
   `mcp.server.Server` with one `on_call_tool` dispatcher. That dispatcher exposes
   only `inventory.challenge` and the protected `inventory.lookup`; the private
   handler is not registered. The server-selected `params.name` and configured
-  method drive authorization, not a caller-provided method field.
+  method drive authorization, not a caller-provided method field. If receipt
+  signing fails after invocation, the dispatcher catches only
+  `PostInvocationError` and returns a strict, explicitly unsigned error state with
+  the spend/invocation facts. That object has no decision, reason, credential, or
+  receipt JWS and is not authenticated evidence.
 - **JWS.** `joserfc==1.7.5` performs compact JWS signing and verification with
   the allowlisted `Ed25519` algorithm. The entire protected header must equal
   `{"alg":"Ed25519","kid":<configured>,"typ":"atcap-decision+jws"}`.
@@ -169,9 +173,15 @@ Implementation anchors:
 10. The deciding service signs a canonical receipt. If the handler itself fails,
     the outcome remains an authorized invocation (`allow` / `HANDLER_FAILED`),
     never a fabricated authorization denial; the MCP result can still set
-    `is_error` to report the business failure. If signing fails after handler
-    completion, `PostInvocationError` preserves that the handler ran rather than
-    returning a false denial.
+    `is_error` to report the business failure. Successful raw handler output is
+    normalized through the strict, extra-forbidden `InventoryLookupResult` into
+    only `sku`, `quantity`, and the server-assigned `invocation_number`.
+    Malformed, extra-field, or non-JSON-safe output becomes a signed authorized
+    `HANDLER_FAILED` result rather than leaking raw output. If signing then fails,
+    `PostInvocationError` is translated at the MCP boundary into the closed
+    `atcap-unsigned-post-invocation/v1` state. It preserves the invocation ID and
+    completion flag without returning a false denial, but it is explicitly not a
+    signed receipt.
 
 ## Invariant-to-evidence map
 
@@ -182,6 +192,7 @@ Implementation anchors:
 | Identity endorses the holder and the complete issuance request | `IssuanceRequest.body/signing_bytes`; `endorse_request`; `verify_identity_endorsement` | `test_holder_substitution_breaks_complete_request_endorsement`; `test_quote_qualifying_data_commits_to_every_issuance_field` |
 | Resource issuer public key and `kid` are request- and policy-bound | `verify_identity_endorsement`; `BrokerPolicy.resource_issuer_*`; broker constructor key match | `test_substituted_resource_issuer_is_denied_even_when_identity_endorses_it`; `test_quote_qualifying_data_commits_to_every_issuance_field` |
 | Protocol version and holder public-key shape are explicit | `verify_identity_endorsement`; `_ISSUANCE_VERSION`; `_ED25519_PUBLIC_HEX_RE` | `test_unsupported_issuance_request_version_is_denied`; `test_identity_endorsed_malformed_holder_key_is_denied` |
+| Runtime-malformed broker request/evidence objects are rejected before that malformed object is input-hashed, appraised, or can cause challenge spend; policy and already-validated safe bindings may already be derived | `_validate_issuance_request_runtime`; `_validate_tpm_evidence_runtime`; `CapabilityBroker.issue` fail-closed preparation | `test_malformed_issuance_request_field_is_signed_without_consuming_challenge`; `test_non_request_runtime_object_is_signed_without_consuming_challenge`; `test_malformed_tpm_evidence_field_is_signed_without_consuming_challenge`; `test_non_evidence_runtime_object_is_signed_without_consuming_challenge` |
 | Synthetic AK certificate policy is checked before released quote verification | `enforce_synthetic_ak_certificate_policy`; `ReleasedTpmAppraiser.appraise` ordering | `test_local_ak_policy_rejects_before_released_quote_verification`; `test_local_ak_policy_fails_closed_on_missing_or_malformed_pem`; `test_local_ak_policy_requires_role_extensions`; `test_local_ak_policy_rejects_naive_evaluation_time`; `test_real_swtpm_ak_certificate_and_signature_denials` |
 | Validity applies to the leaf and non-anchor intermediates, not terminal/configured trust anchors | `_require_current`; terminal-index exclusion; configured-root policy loop | `test_local_ak_policy_does_not_apply_validity_to_trust_anchors`; `test_local_ak_policy_rejects_before_released_quote_verification[expired-intermediate]`; `test_local_ak_policy_rejects_before_released_quote_verification[not-yet-valid-intermediate]` |
 | Quote selection and values are exact and verifier result is literally `True` | `tpm2_pytss_selection_reader`; `ReleasedTpmAppraiser.appraise` | `test_released_adapter_passes_all_policy_bindings_and_requires_true`; `test_truthy_non_boolean_tpm_result_fails_closed`; `test_wrong_signed_pcr_selection_fails_before_quote_acceptance`; `test_real_swtpm_quote_drives_broker_allow_and_rejects_bad_policy` |
@@ -194,9 +205,11 @@ Implementation anchors:
 | Resource challenge and proof bind the exact call | `issue_resource_challenge`; `verify_holder_proof`; `consume_challenge_and_spend_credential` | `test_resource_challenge_hash_and_full_context_are_persisted`; `test_holder_key_substitution_is_denied`; `test_resource_challenge_cannot_be_moved_to_another_credential`; `test_holder_proof_is_bound_to_audience_and_qualified_capability`; `test_resource_challenge_rejects_argument_or_record_substitution` |
 | Challenge and credential validity are rechecked under the redemption lock | `SQLiteStore.consume_challenge_and_spend_credential` | `test_challenge_expiring_while_waiting_for_sqlite_lock_is_not_spent`; `test_credential_expiring_while_waiting_for_sqlite_lock_is_not_spent` |
 | A credential reaches the handler at most once, including concurrent fresh proofs | credential-ID primary key; `consume_challenge_and_spend_credential`; commit-before-handler ordering | `test_spent_credential_is_denied_with_a_fresh_valid_holder_proof`; `test_two_fresh_proofs_racing_one_credential_invoke_exactly_once` |
-| No unauthenticated MCP route reaches the private handler | low-level `_list_tools` / `_call_tool`; private `_inventory_lookup` | `test_only_challenge_and_protected_lookup_are_registered`; `test_unauthenticated_direct_and_mcp_bypass_attempts_never_invoke_handler`; `test_mcp_allow_path_passes_through_resource_native_middleware` |
+| No unauthenticated MCP route reaches the private handler | low-level `_list_tools` / `_call_tool`; private `_inventory_lookup` | `test_only_challenge_and_protected_lookup_are_registered`; `test_unauthenticated_direct_and_mcp_bypass_attempts_never_invoke_handler`; `test_registered_challenge_to_holder_proof_to_lookup_choreography`; `test_malformed_registered_challenge_requests_are_signed_denials` |
 | Receipts require trusted key, exact protected metadata, signature, canonical payload, non-coercing types, closed fields, consistent semantics, and role-specific allow bindings | `DecisionReceiptPayload`; `ReceiptSigner`; `ReceiptVerifier` | all tests in `tests/test_receipts.py`; allow-receipt assertions in broker/resource tests |
-| Failures after invocation are never relabeled as authorization denial | post-spend branch in `InventoryApplication.redeem`; `PostInvocationError` | `test_handler_failure_after_spend_is_an_authorized_failed_execution`; `test_receipt_failure_after_successful_handler_is_never_reclassified_as_denial` |
+| Unexpected preauthorization dependency failures fail closed without leaking inputs or reaching the handler | generic error branches in `CapabilityBroker.issue` and `InventoryApplication.redeem` | `test_unexpected_manifest_verifier_failure_is_signed_and_does_not_leak`; `test_unexpected_tpm_appraiser_failure_is_signed_and_does_not_leak`; `test_unexpected_authorization_failure_is_signed_fail_closed_and_does_not_leak` |
+| Handler output crosses a closed, JSON-safe result boundary after invocation; malformed output is an authorized failed execution and raw fields do not escape | `InventoryLookupResult`; post-handler validation branch in `InventoryApplication.redeem` | `test_mcp_malformed_handler_result_is_signed_failed_execution_without_leakage`; `test_mcp_malformed_handler_result_and_receipt_outage_preserve_unsigned_state` |
+| Failures after invocation are never relabeled as authorization denial | post-spend branch in `InventoryApplication.redeem`; `PostInvocationError`; `UnsignedPostInvocationState` | `test_handler_failure_after_spend_is_an_authorized_failed_execution`; `test_receipt_failure_after_successful_handler_is_never_reclassified_as_denial`; `test_mcp_post_invocation_receipt_outage_returns_unsigned_state_without_leakage` |
 | Broker receipt policy hash changes with every modeled broker trust root and TTL | `ManifestPolicy.public_dict`; `TpmPolicy.public_dict`; `BrokerPolicy.public_dict` | `test_broker_policy_hash_commits_every_security_root_and_ttl`; broker allow-receipt artifact-hash assertion |
 | Resource receipt policy hash changes with every modeled resource-policy input | `ResourcePolicy.public_dict`; `InventoryApplication._receipt` | `test_resource_receipt_policy_hash_commits_every_security_input` |
 | Parallel successful calls retain their own receipt identity | `_record_invocation`; `DecisionReceiptPayload.invocation_id`; `handler_count_snapshot` | `test_parallel_valid_calls_sign_their_own_invocation_ids` |
@@ -230,6 +243,7 @@ uses a genuine software-TPM AK and quote for every profile.
 | Substituted holder in issuance request | `IDENTITY_SIGNATURE` | `test_holder_substitution_breaks_complete_request_endorsement` |
 | Substituted resource issuer key or key ID | `REQUEST_BINDING` | `test_substituted_resource_issuer_is_denied_even_when_identity_endorses_it`; `test_substituted_resource_issuer_kid_is_denied_even_when_identity_endorses_it` |
 | Unsupported issuance protocol or malformed endorsed holder key | `REQUEST_BINDING` | `test_unsupported_issuance_request_version_is_denied`; `test_identity_endorsed_malformed_holder_key_is_denied` |
+| Runtime-malformed issuance-request or TPM-evidence object/field | signed `REQUEST_BINDING` / `TPM_INVALID`, challenge remains usable, no raw value leakage | `test_malformed_issuance_request_field_is_signed_without_consuming_challenge`; `test_non_request_runtime_object_is_signed_without_consuming_challenge`; `test_malformed_tpm_evidence_field_is_signed_without_consuming_challenge`; `test_non_evidence_runtime_object_is_signed_without_consuming_challenge` |
 | Resource credential from another root | `CREDENTIAL_INVALID` | `test_untrusted_resource_specific_broker_root_is_denied` |
 | Wrong resource scope | `SCOPE_DENIED` | `test_wrong_resource_scope_is_denied` |
 | Expired, unbounded, or overlong credential | `CREDENTIAL_EXPIRED` / `CREDENTIAL_INVALID` | `test_expired_credential_is_denied`; `test_credential_with_missing_validity_bound_is_denied`; `test_overlong_credential_lifetime_is_denied` |
@@ -242,16 +256,27 @@ uses a genuine software-TPM AK and quote for every profile.
 | Spent credential with a new valid proof | `CREDENTIAL_SPENT` | `test_spent_credential_is_denied_with_a_fresh_valid_holder_proof` |
 | Two fresh proofs race one credential | one `ALLOW`, one `CREDENTIAL_SPENT`, one invocation | `test_two_fresh_proofs_racing_one_credential_invoke_exactly_once` |
 | Missing auth or private-name MCP bypass | `UNAUTHENTICATED`, zero invocations | `test_unauthenticated_direct_and_mcp_bypass_attempts_never_invoke_handler` |
+| Malformed registered MCP challenge request | signed `UNAUTHENTICATED`, zero invocations, no raw input echo | `test_malformed_registered_challenge_requests_are_signed_denials` |
+| Unexpected manifest, TPM-appraiser, holder-proof, or atomic-spend dependency exception before invocation | signed `INTERNAL_ERROR`, no handler invocation, no raw exception/input/key leakage | `test_unexpected_manifest_verifier_failure_is_signed_and_does_not_leak`; `test_unexpected_tpm_appraiser_failure_is_signed_and_does_not_leak`; `test_unexpected_authorization_failure_is_signed_fail_closed_and_does_not_leak` |
+| Malformed, extra-field, or non-JSON-safe handler result after invocation | signed `allow` / `HANDLER_FAILED`, one spend/invocation, only closed failure state escapes | `test_mcp_malformed_handler_result_is_signed_failed_execution_without_leakage` |
+| Malformed handler result plus receipt-signer outage | explicit unsigned post-invocation state, one spend/invocation, no raw handler or signer detail | `test_mcp_malformed_handler_result_and_receipt_outage_preserve_unsigned_state` |
+| Receipt signer unavailable after handler invocation | explicit unsigned post-invocation MCP error, one spend/invocation, never a denial | `test_mcp_post_invocation_receipt_outage_returns_unsigned_state_without_leakage` |
 | Receipt tampering, wrong key/header, noncanonical JSON, wrong types, unknown fields, inconsistent semantics, or missing allow bindings | `RECEIPT_INVALID` | tests named `test_*receipt*rejected` in `tests/test_receipts.py` |
 
 ## Signed receipt and policy-hash inputs
 
-Broker receipts contain hashes, not raw evidence, for the TPM attestation,
-signature, and AK chain. They also carry:
+On normal runtime-shape-validated input paths, broker receipts contain hashes,
+not raw evidence, for the TPM attestation, signature, and AK chain. They also
+carry:
 
 - `issuance_request_sha256` over the complete request including the identity
   signature; and
 - `broker_policy_sha256` over the RFC 8785 canonical `BrokerPolicy.public_dict()`.
+
+Runtime-malformed denials include only hashes that were safely derived before the
+failure. A hash for an unavailable or not runtime-shape-validated request/evidence
+object is omitted rather than fabricated; policy and already-validated binding
+hashes may still be present.
 
 The broker policy projection includes broker ID, exact scope, resource issuer
 `kid`, resource issuer public key and its SHA-256 digest, challenge and credential
@@ -319,12 +344,16 @@ Host checks use the committed lock and exclude only the Linux `swtpm` marker:
 
 ```sh
 uv sync --frozen --python 3.12 --extra dev
-TZ=UTC uv run --frozen pytest -m 'not swtpm'
+TZ=UTC ./scripts/verify-coverage.sh -m 'not swtpm'
 uv run --frozen ruff check .
 uv run --frozen ruff format --check .
 uv run --frozen mypy
 uv run --frozen bandit -q -r src
-uv run --frozen python -m build --no-isolation
+uv run --frozen bandit -q scripts/verify-package.py
+package_dist_dir="$(mktemp -d)"
+uv run --frozen python -m build --no-isolation --outdir "${package_dist_dir}"
+uv run --frozen python scripts/verify-package.py --dist-dir "${package_dist_dir}"
+find "${package_dist_dir}" -depth -delete
 uv run --frozen pip-audit
 uv run --frozen detect-secrets scan --all-files \
   --exclude-files '(^|/)(\.git|\.venv|\.mypy_cache|\.pytest_cache|\.ruff_cache|build|dist)/' .
@@ -341,7 +370,17 @@ docker compose down --volumes --remove-orphans
 ```
 
 `container-smoke.sh` checks simulator usability first and then runs the complete
-pytest suite, Ruff lint and formatting, strict mypy, Bandit, and package build.
+pytest suite under branch-enabled combined coverage, Ruff lint and formatting,
+strict mypy, Bandit, and strict package verification. Coverage.py combines
+statement and branch opportunities for its configured `fail_under`: the `85.00%`
+combined floor is below the measured `85.66%` pre-change host combined baseline.
+The baseline branch-only percentage was `71.51%`; it is informational, with no
+independent branch-only threshold. Package verification checks exact wheel/sdist
+file inventories, expected sdist modes and Unix wheel modes when present,
+pyproject-derived metadata, wheel `RECORD` hashes/sizes, forbidden-file
+exclusions, and a frozen-lock offline wheel install/import in a fresh
+environment. `tests/test_verify_package.py` fixes duplicate-member, duplicate
+`RECORD`, mode, and metadata-mutation failures as regressions.
 `pip-audit` and `detect-secrets` remain explicit host checks because the former's
 advisory result changes with its online database and neither is part of the TPM
 behavioral smoke.

@@ -6,7 +6,7 @@ import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import ClassVar, Protocol
 
 from agent_manifest import TpmVerificationError, parse_tpm_attest, verify_tpm_quote
 from cryptography import x509
@@ -256,6 +256,7 @@ class ReleasedTpmAppraiser:
 class TestTpmAppraiser:
     """Explicit test double; never selected by production/demo construction."""
 
+    __test__: ClassVar[bool] = False
     accepted_evidence: TpmEvidence
 
     def appraise(

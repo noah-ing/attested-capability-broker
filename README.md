@@ -12,7 +12,7 @@ endorsement, and no upstream issue is claimed closed.
 | Start here | Command or result |
 |---|---|
 | Clean verification | `docker compose build --pull --no-cache` followed by `docker compose up --abort-on-container-exit --exit-code-from verify verify` |
-| Expected smoke result | The full test suite, real-`swtpm` integration, lint, format, type, security, and package checks pass; the verifier prints `container smoke: PASS` and exits `0`. |
+| Expected smoke result | The full suite under branch-enabled combined coverage, real-`swtpm` integration, lint, format, type, security, and installed-package checks pass; the verifier prints `container smoke: PASS` and exits `0`. |
 | Reviewer map | [Audit guide](docs/audit-guide.md) and [threat model](docs/threat-model.md) |
 | Report a vulnerability | Follow the repository's [security policy](SECURITY.md). |
 
@@ -64,12 +64,19 @@ restriction therefore relies on both a resource-specific broker issuer key and
 the fully qualified scope; this experiment does not claim that the credential
 itself is audience-bound.
 
-The deciding service emits a compact JWS decision receipt. Its RFC 8785 canonical
+On normal decision paths, the deciding service emits a compact JWS decision receipt. Its RFC 8785 canonical
 JSON payload is protected with standards-based Ed25519 JWS using protected `alg`,
 `kid`, and `typ` fields and is verified against a configured receipt key. Signed
 types are not coerced, unknown fields are rejected, and cross-field decision
 semantics are checked. Hash-linked cA2A provenance, when present, remains
 unauthenticated diagnostic data.
+
+If receipt signing fails only after the credential has been spent and the handler
+has run, the MCP boundary returns a closed, explicitly `UNSIGNED`
+post-invocation error containing the invocation ID and whether the handler
+completed. It is never labeled a denial and is not an authenticated receipt; a
+caller must treat it as an uncertain post-spend outcome and must not retry the
+credential as though authorization had failed before invocation.
 
 The broker completes certificate-policy, manifest, identity, and TPM appraisal
 before consuming its one-time challenge. Both broker-challenge consumption and
@@ -140,9 +147,21 @@ docker compose down --volumes --remove-orphans
 
 Compose starts one disposable `swtpm` profile on an internal network. The
 verifier checks TPM reachability, installs the `uv.lock`-resolved Python
-environment, runs the complete test suite, lint/format/type checks, Bandit, and a
-wheel/sdist build. Simulator ports are not published to the host, and TPM state
-lives in a temporary in-container filesystem.
+environment, runs the complete suite with branch measurement enabled,
+lint/format/type checks, and Bandit. It then builds the wheel and sdist, verifies
+their metadata and exact file inventories, rejects forbidden generated/private
+files, validates expected sdist modes and Unix wheel modes when present, checks
+every wheel `RECORD` hash and size, and installs the wheel with the frozen
+dependencies into a fresh offline environment for an isolated import smoke.
+Simulator ports are not published to the host, and TPM state lives in a temporary
+in-container filesystem.
+
+Coverage measures both statements and branch opportunities over `atcap`; the
+configured `fail_under` applies to coverage.py's combined percentage. The
+enforced `85.00%` combined floor is below the measured `85.66%` `origin/main`
+combined baseline that preceded this hardening pass. Baseline branch-only
+coverage was `71.51%` and is informational: there is no independent branch-only
+threshold and no claim that every branch is covered.
 
 The integration fixture creates an AK inside `swtpm`, then uses an ephemeral test
 CA to issue a synthetic AK leaf around that public key. It exercises a real quote,
@@ -168,12 +187,16 @@ excludes the Linux-only `swtpm` profile; Compose is authoritative for that path.
 
 ```sh
 uv sync --frozen --python 3.12 --extra dev
-TZ=UTC uv run --frozen pytest -m 'not swtpm'
+TZ=UTC ./scripts/verify-coverage.sh -m 'not swtpm'
 uv run --frozen ruff check .
 uv run --frozen ruff format --check .
 uv run --frozen mypy
 uv run --frozen bandit -q -r src
-uv run --frozen python -m build --no-isolation
+uv run --frozen bandit -q scripts/verify-package.py
+package_dist_dir="$(mktemp -d)"
+uv run --frozen python -m build --no-isolation --outdir "${package_dist_dir}"
+uv run --frozen python scripts/verify-package.py --dist-dir "${package_dist_dir}"
+find "${package_dist_dir}" -depth -delete
 uv run --frozen pip-audit
 uv run --frozen detect-secrets scan --all-files \
   --exclude-files '(^|/)(\.git|\.venv|\.mypy_cache|\.pytest_cache|\.ruff_cache|build|dist)/' .

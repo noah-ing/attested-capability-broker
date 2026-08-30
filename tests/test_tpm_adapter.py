@@ -17,6 +17,7 @@ import atcap.tpm as tpm_module
 from atcap.errors import DecisionError, Reason
 from atcap.tpm import (
     ReleasedTpmAppraiser,
+    TestTpmAppraiser,
     enforce_synthetic_ak_certificate_policy,
     issuance_qualifying_data,
 )
@@ -24,6 +25,10 @@ from atcap.tpm import (
 from .support import Harness
 
 _EVALUATION_TIME = datetime(2026, 8, 29, 12, tzinfo=UTC)
+
+
+def test_test_tpm_appraiser_is_not_a_pytest_test_class() -> None:
+    assert TestTpmAppraiser.__test__ is False
 
 
 def _key_usage(*, digital_signature: bool, key_cert_sign: bool) -> x509.KeyUsage:
