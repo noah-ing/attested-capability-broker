@@ -261,7 +261,16 @@ def _fake_path(tmp_path: Path) -> tuple[Path, Path]:
               printf '{"id":"unrelated-endpoint-id"}\n'
               exit 0
             elif [[ "${FAKE_CREATE_MODE:-}" == "success" ]]; then
-              printf '{"id":"created-endpoint-id"}\n'
+              endpoint_name="$(cat "${FAKE_RUNPOD_STATE}/endpoint-name")"
+              compute_type="${FAKE_ENDPOINT_CREATE_COMPUTE_TYPE:-CPU}"
+              printf '%s' '{"computeType":"'
+              printf '%s' "$compute_type"
+              printf '%s' '","executionTimeoutMs":120000,"flashBootType":"OFF",'
+              printf '%s' '"gpuCount":1,"id":"created-endpoint-id","idleTimeout":5,'
+              printf '%s' '"instanceIds":["cpu3g-4-16"],"name":"'
+              printf '%s' "$endpoint_name"
+              printf '%s' '","scalerType":"REQUEST_COUNT","scalerValue":1,'
+              printf '%s\n' '"templateId":"created-template-id","workersMax":1,"workersMin":0}'
               exit 0
             fi
             printf '{"truncated":'
@@ -300,24 +309,28 @@ def _fake_path(tmp_path: Path) -> tuple[Path, Path]:
             if [[ "${FAKE_CREATE_MODE:-}" == "success" ]]; then
               template_name="$(cat "${FAKE_RUNPOD_STATE}/template-name")"
               endpoint_name="$(cat "${FAKE_RUNPOD_STATE}/endpoint-name")"
-              image="$(cat "${FAKE_RUNPOD_STATE}/template-image")"
-              printf '%s' '{"computeType":"CPU","executionTimeoutMs":120000,'
-              printf '%s' '"flashBootType":"OFF","gpuCount":0,'
-              printf '%s' '"id":"created-endpoint-id","idleTimeout":5,'
-              printf '%s' '"instanceIds":["cpu3g-4-16"],"name":"'
+              printf '%s' '{"executionTimeoutMs":120000,"flashboot":false,"gpuCount":1,'
+              printf '%s' '"id":"created-endpoint-id","idleTimeout":5,"name":"'
               printf '%s' "$endpoint_name"
               printf '%s' '","scalerType":"REQUEST_COUNT","scalerValue":1,'
-              printf '%s' '"template":{"containerDiskInGb":5,'
-              printf '%s' '"dockerEntrypoint":[],"dockerStartCmd":[],"env":{},'
-              printf '%s' '"id":"created-template-id","imageName":"'
-              printf '%s' "$image"
-              printf '%s' '","isServerless":true,"name":"'
+              printf '%s' '"template":{"config":{"templateId":"created-template-id"},'
+              printf '%s' '"containerDiskInGb":5,"containerRegistryAuthId":"",'
+              printf '%s' '"id":"created-template-id","isServerless":true,"name":"'
               printf '%s' "$template_name"
-              printf '%s' '","ports":["8888/http","22/tcp"],"volumeInGb":0},'
-              printf '%s\n' '"templateId":"created-template-id","workersMax":1,"workersMin":0}'
+              printf '%s' '","ports":["8888/http","22/tcp"],"readme":"",'
+              printf '%s' '"startJupyter":true,"startSsh":true},'
+              printf '%s' '"templateId":"created-template-id",'
+              printf '%s' '"urls":{"health":"https://api.runpod.ai/v2/created-endpoint-id/health",'
+              printf '%s' '"run":"https://api.runpod.ai/v2/created-endpoint-id/run",'
+              printf '%s' '"runsync":"https://api.runpod.ai/v2/created-endpoint-id/runsync"},'
+              printf '%s\n' '"workersMax":1,"workersMin":0}'
               exit 0
             fi
             printf '{"id":"unrelated-endpoint-id","name":"unrelated-resource"}\n'
+            ;;
+          "serverless run")
+            printf '1\n' >>"${FAKE_RUNPOD_STATE}/serverless-run-called"
+            printf '{}\n'
             ;;
           *)
             printf '{}\n'
@@ -429,12 +442,52 @@ def test_successful_fake_lifecycle_finalizes_the_exact_prepared_host_child(
         "endpoint:created-endpoint-id",
         "template:created-template-id",
     ]
+    assert (provider_state / "serverless-run-called").read_text().splitlines() == ["1"]
     evidence_dir = next(evidence_root.iterdir())
     assert (evidence_dir / "cleanup-status.txt").read_text() == "cleanup_complete=1\n"
     manifest = json.loads((evidence_dir / "verification-manifest.json").read_text())
     assert manifest["cleanup_complete"] is True
     assert manifest["endpoint_id_sha256"] == hashlib.sha256(b"created-endpoint-id").hexdigest()
     assert manifest["template_id_sha256"] == hashlib.sha256(b"created-template-id").hexdigest()
+    projection = json.loads((evidence_dir / "endpoint-readback-projection.json").read_text())
+    assert projection["schema_version"] == "atcap.runpod.provider-readback-projection.v3"
+    assert projection["provider_observation"]["compute_binding_source"] == (
+        "runpodctl-2.12.0-create-graphql-response"
+    )
+    assert projection["provider_observation"]["generic_gpu_count_is_allocation_evidence"] is False
+
+
+def test_create_response_compute_substitution_fails_before_provider_job(
+    tmp_path: Path,
+) -> None:
+    fake_bin, provider_state = _fake_path(tmp_path)
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+
+    result = subprocess.run(  # noqa: S603
+        _live_command(evidence_root),
+        env=_environment(
+            fake_bin,
+            provider_state,
+            FAKE_CREATE_MODE="success",
+            FAKE_ENDPOINT_CREATE_COMPUTE_TYPE="GPU",
+        ),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "computeType" in result.stderr
+    assert not (provider_state / "serverless-run-called").exists()
+    assert (provider_state / "deleted-ids").read_text().splitlines() == [
+        "endpoint:created-endpoint-id",
+        "template:created-template-id",
+    ]
+    evidence_dir = next(evidence_root.iterdir())
+    assert not (evidence_dir / "endpoint-readback-projection.json").exists()
+    assert (evidence_dir / "cleanup-status.txt").read_text() == "cleanup_complete=1\n"
 
 
 @pytest.mark.parametrize("ambiguous_kind", ["template", "endpoint"])

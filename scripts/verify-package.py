@@ -87,6 +87,7 @@ EXAMPLE_TEST_FILES = {
     "test_run_live_script.py",
 }
 EXAMPLE_FIXTURE_FILES = {
+    "runpodctl-2.12-endpoint-create.json",
     "runpodctl-2.12-endpoint-get.json",
     "runpodctl-2.12-template-get.json",
 }

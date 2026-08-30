@@ -30,6 +30,7 @@ from provider_readback import (
 
 FIXTURES = Path(__file__).with_name("fixtures")
 TEMPLATE_FIXTURE = FIXTURES / "runpodctl-2.12-template-get.json"
+ENDPOINT_CREATE_FIXTURE = FIXTURES / "runpodctl-2.12-endpoint-create.json"
 ENDPOINT_FIXTURE = FIXTURES / "runpodctl-2.12-endpoint-get.json"
 TEMPLATE_ID = "tpl-runpodctl-212-test"
 ENDPOINT_ID = "ep-runpodctl-212-test"
@@ -67,9 +68,12 @@ def _validate_template(path: Path) -> dict[str, object]:
     )
 
 
-def _validate_endpoint(path: Path) -> dict[str, object]:
+def _validate_endpoint(
+    path: Path, *, create_path: Path = ENDPOINT_CREATE_FIXTURE
+) -> dict[str, object]:
     return validate_endpoint_readback(
         path,
+        create_path=create_path,
         endpoint_id=ENDPOINT_ID,
         endpoint_name=RESOURCE_NAME,
         template_id=TEMPLATE_ID,
@@ -89,16 +93,35 @@ def test_sanitized_runpodctl_212_fixtures_validate() -> None:
     assert endpoint["endpoint_id_sha256"] == hashlib.sha256(ENDPOINT_ID.encode()).hexdigest()
 
 
-def test_explicit_integer_zero_volume_is_also_accepted(tmp_path: Path) -> None:
+def test_explicit_integer_zero_volume_is_accepted_in_standalone_template(
+    tmp_path: Path,
+) -> None:
     template = _document(TEMPLATE_FIXTURE)
     template["volumeInGb"] = 0
     _validate_template(_write(tmp_path, template))
 
-    endpoint = _document(ENDPOINT_FIXTURE)
-    nested = endpoint["template"]
-    assert isinstance(nested, dict)
-    nested["volumeInGb"] = 0
-    _validate_endpoint(_write(tmp_path, endpoint))
+
+def test_endpoint_projection_records_composed_provider_observations() -> None:
+    projection = _validate_endpoint(ENDPOINT_FIXTURE)
+
+    assert projection["schema_version"] == "atcap.runpod.provider-readback-projection.v3"
+    observation = projection["provider_observation"]
+    assert isinstance(observation, dict)
+    assert observation == {
+        "compute_binding_source": "runpodctl-2.12.0-create-graphql-response",
+        "generic_gpu_count": 1,
+        "generic_gpu_count_is_allocation_evidence": False,
+        "rest_compute_fields": "omitted",
+        "template_image_source": "prior-standalone-template-readback",
+        "template_start_jupyter": True,
+        "template_start_ssh": True,
+    }
+    requested = projection["requested_config"]
+    assert isinstance(requested, dict)
+    assert requested["compute_type"] == "CPU"
+    assert requested["cpu_instance_id"] == INSTANCE_ID
+    assert requested["gpu"] is False
+    assert requested["network_runtime_assurance"] == "none"
 
 
 def test_reviewed_provider_default_ports_are_exact_and_explicit(tmp_path: Path) -> None:
@@ -142,11 +165,20 @@ def test_provider_default_port_deviations_fail_top_level_and_nested(
         _validate_endpoint(_write(tmp_path, endpoint, "endpoint.json"))
 
 
-def test_provider_default_ports_cannot_be_omitted(tmp_path: Path) -> None:
+def test_provider_default_ports_cannot_be_omitted_top_level_or_nested(
+    tmp_path: Path,
+) -> None:
     template = _document(TEMPLATE_FIXTURE)
     template.pop("ports")
     with pytest.raises(ProviderReadbackError, match="ports"):
-        _validate_template(_write(tmp_path, template))
+        _validate_template(_write(tmp_path, template, "template.json"))
+
+    endpoint = _document(ENDPOINT_FIXTURE)
+    nested = endpoint["template"]
+    assert isinstance(nested, dict)
+    nested.pop("ports")
+    with pytest.raises(ProviderReadbackError, match=r"included template.*ports"):
+        _validate_endpoint(_write(tmp_path, endpoint, "endpoint.json"))
 
 
 @pytest.mark.parametrize(
@@ -198,6 +230,7 @@ def test_template_rejects_runtime_or_registry_overrides(
         ("templateId", "wrong-template"),
         ("computeType", "GPU"),
         ("instanceIds", ["cpu3c-2-4"]),
+        ("instanceIds", []),
         ("workersMin", 1),
         ("workersMax", 2),
         ("idleTimeout", 6),
@@ -205,17 +238,50 @@ def test_template_rejects_runtime_or_registry_overrides(
         ("scalerValue", 2),
         ("executionTimeoutMs", 120001),
         ("executionTimeoutMs", True),
-        ("gpuCount", 1),
+        ("gpuCount", 0),
         ("flashBootType", "FLASHBOOT"),
     ],
 )
-def test_endpoint_rejects_wrong_required_policy(
+def test_endpoint_create_response_rejects_wrong_required_policy(
     tmp_path: Path, field: str, bad_value: object
 ) -> None:
-    document = _document(ENDPOINT_FIXTURE)
+    document = _document(ENDPOINT_CREATE_FIXTURE)
     document[field] = bad_value
     with pytest.raises(ProviderReadbackError, match=field):
-        _validate_endpoint(_write(tmp_path, document))
+        _validate_endpoint(
+            ENDPOINT_FIXTURE,
+            create_path=_write(tmp_path, document, "endpoint-create.json"),
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "id",
+        "name",
+        "templateId",
+        "computeType",
+        "instanceIds",
+        "workersMin",
+        "workersMax",
+        "idleTimeout",
+        "scalerType",
+        "scalerValue",
+        "executionTimeoutMs",
+        "gpuCount",
+        "flashBootType",
+    ],
+)
+def test_endpoint_create_response_rejects_omitted_required_policy(
+    tmp_path: Path, field: str
+) -> None:
+    document = _document(ENDPOINT_CREATE_FIXTURE)
+    document.pop(field)
+    with pytest.raises(ProviderReadbackError, match=field):
+        _validate_endpoint(
+            ENDPOINT_FIXTURE,
+            create_path=_write(tmp_path, document, "endpoint-create.json"),
+        )
 
 
 @pytest.mark.parametrize(
@@ -229,11 +295,97 @@ def test_endpoint_rejects_wrong_required_policy(
         ("networkVolumeIds", ["volume-1"]),
         ("networkVolume", {"id": "volume-1"}),
         ("networkVolumes", [{"id": "volume-1"}]),
-        ("flashboot", True),
-        ("flashBoot", True),
+        ("locations", ["US-TX-3"]),
+        ("modelReferences", ["model-1"]),
+        ("flashboot", False),
+        ("flashBoot", False),
+        ("template", {}),
+        ("workers", []),
     ],
 )
-def test_endpoint_rejects_gpu_volume_or_flash_aliases(
+def test_endpoint_create_response_rejects_gpu_volume_or_rest_aliases(
+    tmp_path: Path, field: str, bad_value: object
+) -> None:
+    document = _document(ENDPOINT_CREATE_FIXTURE)
+    document[field] = bad_value
+    with pytest.raises(ProviderReadbackError, match=field):
+        _validate_endpoint(
+            ENDPOINT_FIXTURE,
+            create_path=_write(tmp_path, document, "endpoint-create.json"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("id", "wrong-endpoint"),
+        ("name", "wrong-name"),
+        ("templateId", "wrong-template"),
+        ("workersMin", 1),
+        ("workersMax", 2),
+        ("idleTimeout", 6),
+        ("scalerType", "QUEUE_DELAY"),
+        ("scalerValue", 2),
+        ("executionTimeoutMs", 120001),
+        ("executionTimeoutMs", True),
+        ("gpuCount", 0),
+        ("gpuCount", True),
+        ("flashboot", True),
+    ],
+)
+def test_endpoint_rest_readback_rejects_wrong_required_policy(
+    tmp_path: Path, field: str, bad_value: object
+) -> None:
+    document = _document(ENDPOINT_FIXTURE)
+    document[field] = bad_value
+    with pytest.raises(ProviderReadbackError, match=field):
+        _validate_endpoint(_write(tmp_path, document))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "id",
+        "name",
+        "templateId",
+        "workersMin",
+        "workersMax",
+        "idleTimeout",
+        "scalerType",
+        "scalerValue",
+        "executionTimeoutMs",
+        "gpuCount",
+        "flashboot",
+        "template",
+    ],
+)
+def test_endpoint_rest_readback_rejects_omitted_required_policy(tmp_path: Path, field: str) -> None:
+    document = _document(ENDPOINT_FIXTURE)
+    document.pop(field)
+    with pytest.raises(ProviderReadbackError, match=field if field != "template" else "template"):
+        _validate_endpoint(_write(tmp_path, document))
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("computeType", "CPU"),
+        ("instanceIds", [INSTANCE_ID]),
+        ("gpuIds", "AMPERE_16"),
+        ("gpuTypeIds", ["NVIDIA RTX A4000"]),
+        ("gpuPoolIds", ["secure-cloud"]),
+        ("serverlessGpuPools", ["AMPERE_16"]),
+        ("networkVolumeId", "volume-1"),
+        ("networkVolumeIds", ["volume-1"]),
+        ("networkVolume", {"id": "volume-1"}),
+        ("networkVolumes", [{"id": "volume-1"}]),
+        ("locations", ["US-TX-3"]),
+        ("modelReferences", ["model-1"]),
+        ("flashBootType", "OFF"),
+        ("flashBoot", False),
+    ],
+)
+def test_endpoint_rest_readback_rejects_compute_gpu_volume_or_flash_aliases(
     tmp_path: Path, field: str, bad_value: object
 ) -> None:
     document = _document(ENDPOINT_FIXTURE)
@@ -247,18 +399,17 @@ def test_endpoint_rejects_gpu_volume_or_flash_aliases(
     [
         ("id", "different-template"),
         ("name", "different-template-name"),
-        ("imageName", WORKER_IMAGE.replace("a", "b")),
         ("isServerless", False),
         ("containerDiskInGb", 6),
-        ("volumeInGb", 1),
-        ("env", {"REFLECT": "provider-value"}),
-        ("ports", ["8888/http"]),
-        ("dockerEntrypoint", ["/bin/sh"]),
-        ("dockerStartCmd", ["python", "unexpected.py"]),
         ("containerRegistryAuthId", "registry-secret-id"),
+        ("readme", "provider text"),
+        ("startJupyter", False),
+        ("startSsh", False),
+        ("config", {"templateId": "different-template"}),
+        ("config", {"templateId": TEMPLATE_ID, "extra": True}),
     ],
 )
-def test_endpoint_rejects_included_template_substitution(
+def test_endpoint_rejects_included_template_required_field_substitution(
     tmp_path: Path, field: str, bad_value: object
 ) -> None:
     document = _document(ENDPOINT_FIXTURE)
@@ -268,6 +419,40 @@ def test_endpoint_rejects_included_template_substitution(
     document["template"] = nested
 
     with pytest.raises(ProviderReadbackError, match=rf"included template.*{field}"):
+        _validate_endpoint(_write(tmp_path, document))
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("imageName", WORKER_IMAGE),
+        ("volumeInGb", 0),
+        ("volumeMountPath", "/workspace"),
+        ("env", {}),
+        ("dockerEntrypoint", []),
+        ("dockerStartCmd", []),
+    ],
+)
+def test_endpoint_rejects_included_template_fields_omitted_by_rest_schema(
+    tmp_path: Path, field: str, bad_value: object
+) -> None:
+    document = _document(ENDPOINT_FIXTURE)
+    nested = document["template"]
+    assert isinstance(nested, dict)
+    nested[field] = bad_value
+
+    with pytest.raises(ProviderReadbackError, match=rf"included template.*{field}"):
+        _validate_endpoint(_write(tmp_path, document))
+
+
+@pytest.mark.parametrize("bad_template", [None, [], "template"])
+def test_endpoint_requires_one_included_template_object(
+    tmp_path: Path, bad_template: object
+) -> None:
+    document = _document(ENDPOINT_FIXTURE)
+    document["template"] = bad_template
+
+    with pytest.raises(ProviderReadbackError, match="omitted the included template"):
         _validate_endpoint(_write(tmp_path, document))
 
 
@@ -378,6 +563,8 @@ def test_endpoint_cli_validates_fixture_and_writes_safe_projection(tmp_path: Pat
             "endpoint",
             "--json",
             str(ENDPOINT_FIXTURE),
+            "--create-json",
+            str(ENDPOINT_CREATE_FIXTURE),
             "--projection",
             str(projection),
             "--endpoint-id",

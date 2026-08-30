@@ -192,6 +192,19 @@ def _expect_absent_or_empty(
         raise ProviderReadbackError(f"{context} field {field} must be empty")
 
 
+def _expect_absent(document: dict[str, object], field: str, *, context: str) -> None:
+    if field in document:
+        raise ProviderReadbackError(f"{context} field {field} must be absent")
+
+
+def _validate_provider_default_ports(document: dict[str, object], *, context: str) -> None:
+    ports = document.get("ports", _MISSING)
+    if type(ports) is not list or ports != list(_RUNPODCTL_2120_PROVIDER_DEFAULT_PORTS):
+        raise ProviderReadbackError(
+            f"{context} field ports did not match the reviewed runpodctl 2.12.0 provider defaults"
+        )
+
+
 def _validate_template(
     document: dict[str, object],
     *,
@@ -221,11 +234,7 @@ def _validate_template(
     # and the current provider fills exactly these two template defaults. The
     # worker image does not run SSH or Jupyter, but Runpod and its networking are
     # outside the trust boundary; accept no additional or duplicate declaration.
-    ports = document.get("ports", _MISSING)
-    if type(ports) is not list or ports != list(_RUNPODCTL_2120_PROVIDER_DEFAULT_PORTS):
-        raise ProviderReadbackError(
-            f"{context} field ports did not match the reviewed runpodctl 2.12.0 provider defaults"
-        )
+    _validate_provider_default_ports(document, context=context)
     for field in ("dockerEntrypoint", "dockerStartCmd"):
         _expect_absent_or_empty(document, field, allowed=(None, "", []), context=context)
     _expect_absent_or_empty(
@@ -287,6 +296,7 @@ def validate_template_readback(
 def validate_endpoint_readback(
     path: Path,
     *,
+    create_path: Path,
     endpoint_id: str,
     endpoint_name: str,
     template_id: str,
@@ -294,7 +304,13 @@ def validate_endpoint_readback(
     instance_id: str,
     worker_image: str,
 ) -> dict[str, object]:
-    """Validate a CPU endpoint and its included template before submitting a job."""
+    """Validate composed create/get evidence before submitting one provider job.
+
+    runpodctl 2.12.0's GraphQL create response carries the CPU instance binding,
+    while its subsequent REST get omits those compute fields.  The REST response
+    independently rebinds the endpoint/template identity and mutable policy
+    fields.  Neither provider response is attestation evidence.
+    """
 
     _validate_expected("endpoint ID", endpoint_id, _RESOURCE_ID)
     _validate_expected("endpoint name", endpoint_name, _RESOURCE_NAME)
@@ -303,8 +319,8 @@ def validate_endpoint_readback(
     _validate_expected("CPU instance ID", instance_id, _RESOURCE_ID)
     _validate_expected("worker image", worker_image, _WORKER_IMAGE)
 
-    document = load_bounded_json_object(path)
-    expected: tuple[tuple[str, object], ...] = (
+    create_document = load_bounded_json_object(create_path)
+    create_expected: tuple[tuple[str, object], ...] = (
         ("id", endpoint_id),
         ("name", endpoint_name),
         ("templateId", template_id),
@@ -316,51 +332,142 @@ def validate_endpoint_readback(
         ("scalerType", "REQUEST_COUNT"),
         ("scalerValue", 1),
         ("executionTimeoutMs", 120_000),
-        ("gpuCount", 0),
+        # The provider returns this generic value even for the CPU instance
+        # binding above. It is checked for response stability, never interpreted
+        # as GPU allocation evidence.
+        ("gpuCount", 1),
         ("flashBootType", "OFF"),
     )
-    for field, value in expected:
-        _expect_exact(document, field, value, context="endpoint read-back")
+    for field, value in create_expected:
+        _expect_exact(create_document, field, value, context="endpoint create response")
 
     _expect_absent_or_empty(
-        document, "gpuIds", allowed=(None, "", []), context="endpoint read-back"
+        create_document,
+        "gpuIds",
+        allowed=(None, "", []),
+        context="endpoint create response",
     )
     for field in ("gpuTypeIds", "gpuPoolIds", "serverlessGpuPools"):
         _expect_absent_or_empty(
-            document, field, allowed=(None, "", []), context="endpoint read-back"
+            create_document,
+            field,
+            allowed=(None, "", []),
+            context="endpoint create response",
         )
     _expect_absent_or_empty(
-        document, "networkVolumeId", allowed=(None, ""), context="endpoint read-back"
+        create_document,
+        "networkVolumeId",
+        allowed=(None, ""),
+        context="endpoint create response",
     )
     _expect_absent_or_empty(
-        document, "networkVolumeIds", allowed=(None, []), context="endpoint read-back"
+        create_document,
+        "networkVolumeIds",
+        allowed=(None, []),
+        context="endpoint create response",
     )
+    create_empty_fields: tuple[tuple[str, tuple[object, ...]], ...] = (
+        ("networkVolume", (None, {})),
+        ("networkVolumes", (None, [])),
+        ("locations", (None, "", [])),
+        ("modelReferences", (None, [])),
+    )
+    for field, allowed in create_empty_fields:
+        _expect_absent_or_empty(
+            create_document,
+            field,
+            allowed=allowed,
+            context="endpoint create response",
+        )
+    for field in ("flashboot", "flashBoot", "template", "workers"):
+        _expect_absent(create_document, field, context="endpoint create response")
+
+    document = load_bounded_json_object(path)
+    get_expected: tuple[tuple[str, object], ...] = (
+        ("id", endpoint_id),
+        ("name", endpoint_name),
+        ("templateId", template_id),
+        ("workersMin", 0),
+        ("workersMax", 1),
+        ("idleTimeout", 5),
+        ("scalerType", "REQUEST_COUNT"),
+        ("scalerValue", 1),
+        ("executionTimeoutMs", 120_000),
+        ("gpuCount", 1),
+        ("flashboot", False),
+    )
+    for field, value in get_expected:
+        _expect_exact(document, field, value, context="endpoint REST read-back")
+    for field in ("computeType", "instanceIds", "flashBootType", "flashBoot"):
+        _expect_absent(document, field, context="endpoint REST read-back")
     _expect_absent_or_empty(
-        document, "networkVolume", allowed=(None, {}), context="endpoint read-back"
+        document, "gpuIds", allowed=(None, "", []), context="endpoint REST read-back"
     )
-    _expect_absent_or_empty(
-        document, "networkVolumes", allowed=(None, []), context="endpoint read-back"
+    for field in ("gpuTypeIds", "gpuPoolIds", "serverlessGpuPools"):
+        _expect_absent_or_empty(
+            document,
+            field,
+            allowed=(None, "", []),
+            context="endpoint REST read-back",
+        )
+    get_empty_fields: tuple[tuple[str, tuple[object, ...]], ...] = (
+        ("networkVolumeId", (None, "")),
+        ("networkVolumeIds", (None, [])),
+        ("networkVolume", (None, {})),
+        ("networkVolumes", (None, [])),
+        ("locations", (None, "", [])),
+        ("modelReferences", (None, [])),
     )
-    for field in ("flashboot", "flashBoot"):
-        observed = document.get(field, _MISSING)
-        if observed is not _MISSING and (type(observed) is not bool or observed is not False):
-            raise ProviderReadbackError(f"endpoint read-back field {field} must be false")
+    for field, allowed in get_empty_fields:
+        _expect_absent_or_empty(
+            document,
+            field,
+            allowed=allowed,
+            context="endpoint REST read-back",
+        )
 
     nested = document.get("template", _MISSING)
     if not isinstance(nested, dict):
-        raise ProviderReadbackError("endpoint read-back omitted the included template")
-    _validate_template(
-        cast(dict[str, object], nested),
-        template_id=template_id,
-        template_name=template_name,
-        worker_image=worker_image,
-        context="endpoint included template",
+        raise ProviderReadbackError("endpoint REST read-back omitted the included template")
+    nested_document = cast(dict[str, object], nested)
+    nested_expected: tuple[tuple[str, object], ...] = (
+        ("id", template_id),
+        ("name", template_name),
+        ("isServerless", True),
+        ("containerDiskInGb", 5),
+        ("containerRegistryAuthId", ""),
+        ("readme", ""),
+        ("startJupyter", True),
+        ("startSsh", True),
+        ("config", {"templateId": template_id}),
     )
+    for field, value in nested_expected:
+        _expect_exact(nested_document, field, value, context="endpoint included template")
+    _validate_provider_default_ports(nested_document, context="endpoint included template")
+    for field in (
+        "imageName",
+        "volumeInGb",
+        "volumeMountPath",
+        "env",
+        "dockerEntrypoint",
+        "dockerStartCmd",
+    ):
+        _expect_absent(nested_document, field, context="endpoint included template")
+
     return {
-        "schema_version": "atcap.runpod.provider-readback-projection.v2",
+        "schema_version": "atcap.runpod.provider-readback-projection.v3",
         "resource": "endpoint",
         "endpoint_id_sha256": _identifier_sha256(endpoint_id),
         "template_id_sha256": _identifier_sha256(template_id),
+        "provider_observation": {
+            "compute_binding_source": "runpodctl-2.12.0-create-graphql-response",
+            "generic_gpu_count": 1,
+            "generic_gpu_count_is_allocation_evidence": False,
+            "rest_compute_fields": "omitted",
+            "template_image_source": "prior-standalone-template-readback",
+            "template_start_jupyter": True,
+            "template_start_ssh": True,
+        },
         "requested_config": {
             "compute_type": "CPU",
             "cpu_instance_id": instance_id,
@@ -368,6 +475,7 @@ def validate_endpoint_readback(
             "execution_timeout_seconds": 120,
             "flash_boot": False,
             "gpu": False,
+            "network_runtime_assurance": "none",
             "idle_timeout_seconds": 5,
             "network_volume": False,
             "scaler_request_count": 1,
@@ -561,6 +669,7 @@ def _parser() -> argparse.ArgumentParser:
 
     endpoint = subparsers.add_parser("endpoint")
     endpoint.add_argument("--json", type=Path, required=True)
+    endpoint.add_argument("--create-json", type=Path, required=True)
     endpoint.add_argument("--projection", type=Path, required=True)
     endpoint.add_argument("--endpoint-id", required=True)
     endpoint.add_argument("--endpoint-name", required=True)
@@ -601,6 +710,7 @@ def main(argv: list[str] | None = None) -> int:
         elif arguments.command == "endpoint":
             projection = validate_endpoint_readback(
                 arguments.json,
+                create_path=arguments.create_json,
                 endpoint_id=arguments.endpoint_id,
                 endpoint_name=arguments.endpoint_name,
                 template_id=arguments.template_id,

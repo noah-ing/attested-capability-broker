@@ -184,11 +184,21 @@ The cost controls are intentionally narrow:
   selected duration it sends `TERM` to the local process group and allows up to
   120 seconds for its cleanup trap before sending `KILL`. It is neither a hard
   cost cap nor proof that the provider job stopped; and
-- a post-create read-back that must exactly match the CPU instance, template,
-  worker bounds, scaler, timeouts, FlashBoot-off state, no GPU pool, and no
-  network volume before the job is submitted. The standard-library validator
-  bounds JSON size/shape, rejects duplicate members, and revalidates the nested
-  included template.
+- a composed, pre-submission validation across three `runpodctl` 2.12.0
+  responses. The GraphQL endpoint-create response must carry the exact
+  `computeType: CPU` and `instanceIds: [cpu3g-4-16]` binding; the subsequent REST
+  endpoint read-back must carry the exact endpoint/template identities, worker
+  bounds, scaler, timeouts, FlashBoot-off state, no GPU pool, and no network
+  volume; and the earlier standalone template read-back must bind the template
+  to the immutable worker-image digest. The REST endpoint read-back omits
+  `computeType` and `instanceIds` and reports the provider's generic
+  `gpuCount: 1`; the validator checks that value only as part of the reviewed
+  response shape and never interprets it as GPU-allocation evidence. The
+  standard-library validator bounds JSON size/shape, rejects duplicate members,
+  and revalidates the nested included template. Any omission, type/value change,
+  or list-shape change in these reviewed bindings, or the appearance of a
+  specifically forbidden compute, GPU, volume, model, location, or template
+  alias, stops the run before the one provider job submission.
 
 [`runpodctl` 2.12.0](https://github.com/runpod/runpodctl/blob/v2.12.0/cmd/template/create.go#L95-L97)
 omits an empty ports slice from its template-create REST body; the current
@@ -196,13 +206,18 @@ provider then reports the ordered defaults `8888/http` and `22/tcp`. The
 read-back validator accepts exactly that typed list and rejects omissions,
 reordering, duplicates, or additions. The evidence projection records
 `ports_requested: false`, those provider defaults, and
-`port_reachability_assurance: none`. The worker image runs as a
-non-root user and contains neither Jupyter nor an SSH daemon, but this experiment
-does not test or claim port reachability, isolation, authentication, lack of
-exposure, or a trustworthy Runpod network/runtime boundary. The worker receives
-only disposable holder material, and all of its output remains adversarial input
-to the local controller; the port metadata does not create a path to local
-`inventoryd`.
+`port_reachability_assurance: none`. The REST endpoint's included-template view
+also reports `startSsh: true` and `startJupyter: true`; the validator accepts
+exactly those provider-default flags as response-shape observations, not as
+evidence that either service is running, reachable, authenticated, isolated, or
+implemented by the reviewed image. The worker image runs as a non-root user and
+contains neither Jupyter nor an SSH daemon, but Runpod, its networking, and its
+actual worker runtime remain wholly untrusted. The composed read-backs do not
+prove that Runpod executed the intended image or any particular bytes. The
+worker receives only disposable holder material, and all of its output remains
+adversarial input to the local controller; the port and start-flag metadata do
+not create a path to local `inventoryd` or establish any network/runtime
+assurance.
 
 The runner creates uniquely named template and endpoint resources. On handled
 exit, interrupt, deadline, and error paths it attempts endpoint deletion followed
@@ -238,14 +253,17 @@ output, the canonical `experiment-record.json`, compact
 `experiment-record.jws`, public-only `experiment-verifier.json`, a bounded
 billing observation, cleanup logs/status, `SHA256SUMS`, and
 `verification-manifest.json`. Resource IDs in those projections are SHA-256
-digests; the fields otherwise come only from local expected configuration. Raw
-provider template/endpoint read-backs remain in the mode-`0700` temporary state
-directory, are never copied into evidence, and are removed with a path guard.
-The evidence bundle is untracked and excluded from the worker build context; do
-not commit it. Treat it as private operational evidence: it contains proof
-material and billing observations, and an incomplete-cleanup recovery file may
-contain exact unique names or a local private-state path, so inspect and
-deliberately redact it before sharing.
+digests. The projections contain the local expected configuration plus closed,
+explicit provider observations such as the composed read-back sources, generic
+GPU count, omitted REST compute fields, default ports, and start flags; they do
+not authenticate those observations. Raw provider template/endpoint read-backs
+remain in the mode-`0700` temporary state directory, are never copied into
+evidence, and are removed with a path guard. The evidence bundle is untracked
+and excluded from the worker build context; do not commit it. Treat it as
+private operational evidence: it contains proof material and billing
+observations, and an incomplete-cleanup recovery file may contain exact unique
+names or a local private-state path, so inspect and deliberately redact it
+before sharing.
 
 Verify a completed record from the repository root:
 

@@ -744,6 +744,7 @@ capture_bounded endpoint-get 15 \
   runpodctl serverless get "$endpoint_id" --include-template --output json
 python3 "${example_dir}/provider_readback.py" endpoint \
   --json "$endpoint_verified" \
+  --create-json "$endpoint_response" \
   --projection "$endpoint_projection" \
   --endpoint-id "$endpoint_id" \
   --endpoint-name "$endpoint_name" \
