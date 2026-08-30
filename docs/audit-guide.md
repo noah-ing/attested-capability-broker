@@ -408,6 +408,14 @@ environment. `tests/test_verify_package.py` fixes duplicate-member, duplicate
 advisory result changes with its online database and neither is part of the TPM
 behavioral smoke.
 
+The optional live runner performs a separate fail-closed worker gate before any
+Runpod mutation: it anonymously pulls the configured immutable `linux/amd64`
+digest and runs both deployed self-tests with no network, a read-only root
+filesystem, non-root identity, dropped capabilities, and
+`no-new-privileges`. The worker Dockerfile rejects an empty dependency lock,
+runs `pip check`, and imports the copied handler during the build. These are
+local startability checks, not evidence that Runpod executed that image.
+
 The Docker path has a digest-pinned base-image index and a committed Python lock.
 It is not bit reproducible:
 apt package versions come from floating Debian repositories, and the

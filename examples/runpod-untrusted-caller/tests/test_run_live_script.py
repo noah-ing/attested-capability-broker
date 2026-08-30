@@ -115,7 +115,32 @@ def _fake_path(tmp_path: Path) -> tuple[Path, Path]:
           printf 'fake prepared state\n' >"${host_child}/fake-prepared-state"
           chmod 0600 "${host_child}/fake-prepared-state"
         fi
-        if [[ "${1:-}" == "info" ]]; then
+        if [[ "${1:-}" == "pull" ]]; then
+          printf 'pull\n' >>"${FAKE_RUNPOD_STATE}/worker-preflight-events"
+          printf '%s\n' "$@" >"${FAKE_RUNPOD_STATE}/worker-pull-args"
+          if [[ -n "${RUNPOD_API_KEY+x}" ]]; then
+            printf 'present\n' >"${FAKE_RUNPOD_STATE}/worker-pull-api-key"
+          else
+            printf 'absent\n' >"${FAKE_RUNPOD_STATE}/worker-pull-api-key"
+          fi
+          if [[ "${FAKE_REQUIRE_ANONYMOUS_REGISTRY:-0}" == "1" \
+            && ( -n "${DOCKER_AUTH_CONFIG:-}" || -n "${REGISTRY_AUTH_FILE:-}" ) ]]; then
+            exit 76
+          fi
+        elif [[ "${1:-}" == "run" ]]; then
+          printf 'run\n' >>"${FAKE_RUNPOD_STATE}/worker-preflight-events"
+          printf '%s\n' "$@" >"${FAKE_RUNPOD_STATE}/worker-runtime-args"
+          if [[ -n "${RUNPOD_API_KEY+x}" ]]; then
+            printf 'present\n' >"${FAKE_RUNPOD_STATE}/worker-runtime-api-key"
+          else
+            printf 'absent\n' >"${FAKE_RUNPOD_STATE}/worker-runtime-api-key"
+          fi
+          [[ ! -e "${FAKE_RUNPOD_STATE}/template-name" ]] || exit 86
+          [[ ! -e "${FAKE_RUNPOD_STATE}/endpoint-name" ]] || exit 87
+          if [[ "${FAKE_WORKER_PREFLIGHT_FAIL:-0}" == "1" ]]; then
+            exit 88
+          fi
+        elif [[ "${1:-}" == "info" ]]; then
           printf '[{"Name":"buildx","Path":"%s"}]\n' "$FAKE_DOCKER_PLUGIN"
         elif [[ "${1:-} ${2:-} ${3:-}" == "buildx imagetools inspect" ]]; then
           if [[ "${FAKE_REQUIRE_ANONYMOUS_REGISTRY:-0}" == "1" \
@@ -148,6 +173,7 @@ def _fake_path(tmp_path: Path) -> tuple[Path, Path]:
         if [[ "${FAKE_OVERSIZE_COMMAND:-}" == "curl" ]]; then
           while :; do printf '0123456789abcdef'; done
         fi
+        printf '1\n' >"${FAKE_RUNPOD_STATE}/curl-called"
         printf 'fake-current-source\n'
         """,
     )
@@ -388,6 +414,125 @@ def _environment(fake_bin: Path, provider_state: Path, **extra: str) -> dict[str
         "FAKE_IMAGE_INDEX": RAW_IMAGE_INDEX,
         **extra,
     }
+
+
+def _assert_option(args: list[str], name: str, value: str) -> None:
+    joined = f"{name}={value}"
+    if joined in args:
+        return
+    assert any(
+        argument == name and index + 1 < len(args) and args[index + 1] == value
+        for index, argument in enumerate(args)
+    )
+
+
+def test_worker_runtime_preflight_is_hardened_exact_and_before_remote_work(
+    tmp_path: Path,
+) -> None:
+    fake_bin, provider_state = _fake_path(tmp_path)
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    environment = _environment(
+        fake_bin,
+        provider_state,
+        FAKE_CREATE_MODE="success",
+        FAKE_REQUIRE_ANONYMOUS_REGISTRY="1",
+        FAKE_REQUIRE_KEY_ISOLATION="1",
+    )
+    environment["RUNPOD_" + "API_KEY"] = "fake-provider-key"
+    environment["DOCKER_" + "AUTH_CONFIG"] = '{"auths":{"registry.invalid":{}}}'
+    environment["REGISTRY_" + "AUTH_FILE"] = str(tmp_path / "must-not-be-read.json")
+
+    result = subprocess.run(  # noqa: S603
+        _live_command(evidence_root),
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (provider_state / "worker-preflight-events").read_text().splitlines() == [
+        "pull",
+        "run",
+    ]
+    assert (provider_state / "worker-pull-api-key").read_text() == "absent\n"
+    assert (provider_state / "worker-runtime-api-key").read_text() == "absent\n"
+
+    pull_args = (provider_state / "worker-pull-args").read_text().splitlines()
+    assert pull_args[0] == "pull"
+    _assert_option(pull_args, "--platform", "linux/amd64")
+    assert pull_args.count(LIVE_WORKER_IMAGE) == 1
+
+    runtime_args = (provider_state / "worker-runtime-args").read_text().splitlines()
+    assert runtime_args[0] == "run"
+    _assert_option(runtime_args, "--pull", "never")
+    _assert_option(runtime_args, "--platform", "linux/amd64")
+    _assert_option(runtime_args, "--network", "none")
+    _assert_option(runtime_args, "--cap-drop", "ALL")
+    _assert_option(runtime_args, "--security-opt", "no-new-privileges")
+    assert "--read-only" in runtime_args
+    assert runtime_args.count(LIVE_WORKER_IMAGE) == 1
+    command = " ".join(runtime_args)
+    assert "test -s" in command and "requirements.lock" in command
+    assert "python -m pip check" in command
+    assert "self_test.py" in command
+    assert "handler_self_test.py" in command
+
+
+def test_worker_runtime_preflight_failure_has_no_provider_mutation_or_local_prep(
+    tmp_path: Path,
+) -> None:
+    fake_bin, provider_state = _fake_path(tmp_path)
+    evidence_root = tmp_path / "evidence"
+    evidence_root.mkdir()
+    environment = _environment(
+        fake_bin,
+        provider_state,
+        FAKE_CREATE_MODE="success",
+        FAKE_WORKER_PREFLIGHT_FAIL="1",
+    )
+    environment["RUNPOD_" + "API_KEY"] = "fake-provider-key"
+
+    result = subprocess.run(  # noqa: S603
+        _live_command(evidence_root),
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert (provider_state / "worker-preflight-events").read_text().splitlines() == [
+        "pull",
+        "run",
+    ]
+    assert (provider_state / "worker-runtime-api-key").read_text() == "absent\n"
+    assert not (provider_state / "curl-called").exists()
+    assert not (provider_state / "prepare-state-dir").exists()
+    assert not (provider_state / "template-name").exists()
+    assert not (provider_state / "endpoint-name").exists()
+    assert not (provider_state / "serverless-run-called").exists()
+    assert not (provider_state / "deleted-ids").exists()
+
+
+def test_worker_runtime_preflight_precedes_pricing_prep_and_provider_mutation() -> None:
+    script = Path(__file__).resolve().parents[1] / "scripts" / "run-live.sh"
+    source = script.read_text(encoding="utf-8")
+
+    pull_at = source.index("docker pull")
+    runtime_at = source.index("docker run")
+    assert pull_at < runtime_at
+    for later_boundary in (
+        'pricing_source_status="not_attempted"',
+        "python -m lab.live_cli prepare",
+        "runpodctl template create",
+        "runpodctl serverless create",
+        "runpodctl serverless run",
+    ):
+        assert runtime_at < source.index(later_boundary)
 
 
 def test_prepare_uses_a_dedicated_empty_trusted_state_subdirectory(tmp_path: Path) -> None:

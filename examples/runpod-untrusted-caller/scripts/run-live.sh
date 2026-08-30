@@ -209,6 +209,7 @@ endpoint_name="atcap-holder-${safe_suffix}"
 readonly PROVIDER_JSON_LIMIT_BYTES=1048576
 readonly PROVIDER_STDERR_LIMIT_BYTES=262144
 readonly WORKER_RESPONSE_LIMIT_BYTES=2097152
+readonly WORKER_PREFLIGHT_LOG_LIMIT_BYTES=1048576
 readonly REMOTE_DOCUMENT_LIMIT_BYTES=2097152
 readonly COMPOSE_LOG_LIMIT_BYTES=16777216
 readonly CLEANUP_COMMAND_TIMEOUT_SECONDS=3
@@ -568,6 +569,42 @@ python3 "${example_dir}/provider_readback.py" image \
   --projection "${evidence_dir}/worker-image-manifest-projection.json" \
   --worker-image "$worker_image"
 
+# A manifest proves that an amd64 image member exists, not that its process can
+# start. Pull anonymously by the exact requested digest, then run both deployed
+# contract checks with the same least-privilege boundary used by CI. This must
+# pass before pricing retrieval, local capability preparation, or any Runpod
+# resource mutation.
+if ! capture_bounded anonymous-image-pull 120 \
+  "${state_dir}/worker-image-pull.stdout.raw.log" "$PROVIDER_JSON_LIMIT_BYTES" \
+  "${state_dir}/worker-image-pull.stderr.raw.log" "$PROVIDER_STDERR_LIMIT_BYTES" 0 \
+  env -u RUNPOD_API_KEY -u DOCKER_AUTH_CONFIG -u REGISTRY_AUTH_FILE \
+  DOCKER_CONFIG="$anonymous_docker_config" \
+  docker pull --platform linux/amd64 "$worker_image"; then
+  fail "anonymous exact-digest worker-image pull failed"
+fi
+if ! capture_bounded exact-image-runtime-smoke 120 \
+  "${evidence_dir}/worker-runtime-smoke.stdout.log" "$WORKER_PREFLIGHT_LOG_LIMIT_BYTES" \
+  "${evidence_dir}/worker-runtime-smoke.stderr.log" "$WORKER_PREFLIGHT_LOG_LIMIT_BYTES" 0 \
+  env -u RUNPOD_API_KEY -u DOCKER_AUTH_CONFIG -u REGISTRY_AUTH_FILE \
+  DOCKER_CONFIG="$anonymous_docker_config" \
+  docker run --rm --pull never --platform linux/amd64 --network none --read-only \
+    --env "ATCAP_SELF_TEST_WORKER_IMAGE=${worker_image}" \
+    --env PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    --env PIP_NO_CACHE_DIR=1 \
+    --env TMPDIR=/run/worker-tmp \
+    --tmpfs /run/worker-tmp:rw,noexec,nosuid,size=16m \
+    --cap-drop ALL --security-opt no-new-privileges \
+    "$worker_image" sh -eu -c \
+      'test -s /opt/worker/requirements.lock
+       test "$(id -u)" = 10001
+       test "$(id -g)" = 10001
+       test -z "${RUNPOD_API_KEY:-}"
+       python -m pip check
+       python /opt/worker/self_test.py
+       python /opt/worker/handler_self_test.py'; then
+  fail "exact-digest worker runtime preflight failed"
+fi
+
 pricing_source_status="not_attempted"
 cpu_types_source_status="not_attempted"
 write_remote_source_status() {
@@ -616,6 +653,7 @@ fi
   printf 'whole_run_limit_minutes=%s\n' "$max_duration_minutes"
   printf 'capability_ttl_seconds=%s\n' "$capability_ttl_seconds"
   printf 'local_tpm_mode=real-swtpm\n'
+  printf 'exact_digest_worker_runtime_preflight=passed\n'
   printf 'provider_submission_policy=at_most_one_attempt\n'
   printf 'provider_resubmission=forbidden\n'
 } >"${evidence_dir}/run-configuration.txt"

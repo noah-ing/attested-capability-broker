@@ -132,8 +132,14 @@ The image must be anonymously pullable by Runpod: this narrow runner does not
 accept or provision container-registry credentials. Supply only
 `registry/repository@sha256:<64 lowercase hex>`; never use `latest` or a tag
 alone. The live runner inspects the registry manifest and refuses an image index
-without an exact `linux/amd64` member. That check binds configuration to registry
-bytes; it still does not attest what Runpod executes.
+without an exact `linux/amd64` member. It then anonymously pulls that exact
+digest and, before any Runpod resource mutation, runs both deployed worker
+self-tests with no network, a read-only root filesystem, a non-root user, no
+Linux capabilities, and `no-new-privileges`. The image build itself rejects an
+empty dependency lock, runs `pip check`, and imports the copied handler. These
+checks prevent publishing or selecting a locally non-starting worker; they bind
+local configuration to registry bytes but still do not attest what Runpod
+executes.
 
 ## Live run: cost and cleanup boundary
 
@@ -199,6 +205,12 @@ The cost controls are intentionally narrow:
   or list-shape change in these reviewed bindings, or the appearance of a
   specifically forbidden compute, GPU, volume, model, location, or template
   alias, stops the run before the one provider job submission.
+
+The exact-digest runtime preflight is intentionally stronger than manifest
+inspection. A syntactically valid image can still contain an empty dependency
+lock or a handler that cannot import. The runner records bounded self-test logs
+in the diagnostic evidence bundle and refuses to create a template or endpoint
+unless the pulled image starts and passes both deployed contracts locally.
 
 [`runpodctl` 2.12.0](https://github.com/runpod/runpodctl/blob/v2.12.0/cmd/template/create.go#L95-L97)
 omits an empty ports slice from its template-create REST body; the current

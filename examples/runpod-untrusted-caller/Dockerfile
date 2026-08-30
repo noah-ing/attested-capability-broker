@@ -17,7 +17,10 @@ RUN test "$TARGETPLATFORM" = "linux/amd64" \
 WORKDIR /opt/worker
 
 COPY --chown=worker:worker requirements.lock ./requirements.lock
-RUN python -m pip install --no-cache-dir --require-hashes --requirement requirements.lock
+RUN test -s requirements.lock \
+    && python -m pip install --no-cache-dir --require-hashes --requirement requirements.lock \
+    && python -m pip check \
+    && python -c 'import ca2a_runtime, cryptography, joserfc, pydantic, rfc8785, runpod'
 
 COPY --chown=worker:worker handler.py handler_self_test.py self_test.py ./
 COPY --chown=worker:worker \
@@ -26,6 +29,11 @@ COPY --chown=worker:worker \
     lab/worker.py \
     lab/worker_wire.py \
     ./lab/
+
+# Import the exact copied entrypoint and shared modules during the build. This
+# makes a missing runtime dependency or malformed source a build failure rather
+# than a worker that can never join the Runpod dispatcher.
+RUN python -c 'import handler, lab.worker, lab.worker_wire'
 
 USER 10001:10001
 

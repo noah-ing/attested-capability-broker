@@ -85,6 +85,7 @@ EXAMPLE_TEST_FILES = {
     "test_real_swtpm_lab.py",
     "test_record.py",
     "test_run_live_script.py",
+    "test_worker_image_contract.py",
 }
 EXAMPLE_FIXTURE_FILES = {
     "runpodctl-2.12-endpoint-create.json",
