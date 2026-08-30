@@ -1,0 +1,35 @@
+{
+  "executionTimeoutMs": 120000,
+  "flashboot": false,
+  "gpuCount": 1,
+  "id": "ep-runpodctl-212-test",
+  "idleTimeout": 5,
+  "name": "atcap-holder-runpodctl-212-test",
+  "scalerType": "REQUEST_COUNT",
+  "scalerValue": 1,
+  "template": {
+    "config": {
+      "templateId": "tpl-runpodctl-212-test"
+    },
+    "containerDiskInGb": 5,
+    "containerRegistryAuthId": "",
+    "id": "tpl-runpodctl-212-test",
+    "isServerless": true,
+    "name": "atcap-holder-runpodctl-212-test",
+    "ports": [
+      "8888/http",
+      "22/tcp"
+    ],
+    "readme": "",
+    "startJupyter": true,
+    "startSsh": true
+  },
+  "templateId": "tpl-runpodctl-212-test",
+  "urls": {
+    "health": "https://api.runpod.ai/v2/ep-runpodctl-212-test/health",
+    "run": "https://api.runpod.ai/v2/ep-runpodctl-212-test/run",
+    "runsync": "https://api.runpod.ai/v2/ep-runpodctl-212-test/runsync"
+  },
+  "workersMax": 1,
+  "workersMin": 0
+}

@@ -1,0 +1,17 @@
+{
+  "computeType": "CPU",
+  "executionTimeoutMs": 120000,
+  "flashBootType": "OFF",
+  "gpuCount": 1,
+  "id": "ep-runpodctl-212-test",
+  "idleTimeout": 5,
+  "instanceIds": [
+    "cpu3g-4-16"
+  ],
+  "name": "atcap-holder-runpodctl-212-test",
+  "scalerType": "REQUEST_COUNT",
+  "scalerValue": 1,
+  "templateId": "tpl-runpodctl-212-test",
+  "workersMax": 1,
+  "workersMin": 0
+}

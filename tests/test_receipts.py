@@ -80,6 +80,17 @@ def test_receipt_round_trip_requires_configured_trusted_key() -> None:
     assert verified == payload
 
 
+def test_receipt_verifier_exports_only_the_exact_public_jwk() -> None:
+    signer = ReceiptSigner.generate(key_id="inventory-receipt-v1")
+    verifier = ReceiptVerifier(signer.public_key(), key_id="inventory-receipt-v1")
+
+    public_jwk = verifier.public_jwk()
+
+    assert public_jwk == signer.public_key().as_dict(private=False)
+    assert public_jwk["kid"] == verifier.key_id
+    assert "d" not in public_jwk
+
+
 def test_tampered_receipt_is_rejected() -> None:
     signer = ReceiptSigner.generate(key_id="inventory-receipt-v1")
     verifier = ReceiptVerifier(

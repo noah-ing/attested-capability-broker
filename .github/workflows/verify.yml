@@ -21,6 +21,25 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.5"
+          enable-cache: false
+
+      - name: Install TPM build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential libtss2-dev pkg-config
+
+      - name: Audit locked core and worker dependencies
+        run: |
+          uv sync --frozen --extra dev
+          uv run --frozen pip-audit
+          uv run --frozen pip-audit \
+            -r examples/runpod-untrusted-caller/requirements.lock
+
       - name: Validate Compose configuration
         run: docker compose config --quiet
 
@@ -33,3 +52,20 @@ jobs:
       - name: Remove containers, volumes, and network
         if: always()
         run: docker compose down --volumes --remove-orphans
+
+      - name: Build isolated untrusted-caller worker
+        run: |
+          docker build --platform linux/amd64 \
+            --tag atcap-runpod-holder:ci \
+            examples/runpod-untrusted-caller
+
+      - name: Run worker smoke without network or privileges
+        run: |
+          docker run --rm --platform linux/amd64 --network none --read-only \
+            --env TMPDIR=/run/worker-tmp \
+            --tmpfs /run/worker-tmp:rw,noexec,nosuid,size=16m \
+            --cap-drop ALL --security-opt no-new-privileges \
+            atcap-runpod-holder:ci sh -c \
+              'python /opt/worker/self_test.py && python /opt/worker/handler_self_test.py'
+          test "$(docker image inspect atcap-runpod-holder:ci --format '{{.Architecture}}')" = amd64
+          test "$(docker image inspect atcap-runpod-holder:ci --format '{{.Config.User}}')" = 10001:10001

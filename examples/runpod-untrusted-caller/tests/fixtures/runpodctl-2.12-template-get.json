@@ -1,0 +1,12 @@
+{
+  "containerDiskInGb": 5,
+  "id": "tpl-runpodctl-212-test",
+  "imageName": "ghcr.io/noah-ing/atcap-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "isServerless": true,
+  "name": "atcap-holder-runpodctl-212-test",
+  "ports": [
+    "8888/http",
+    "22/tcp"
+  ],
+  "volumeMountPath": "/workspace"
+}
