@@ -32,6 +32,7 @@ RAW_IMAGE_INDEX = json.dumps(
 LIVE_WORKER_IMAGE = (
     "ghcr.io/noah-ing/atcap-worker@sha256:" + hashlib.sha256(RAW_IMAGE_INDEX.encode()).hexdigest()
 )
+PROVIDER_CREDENTIAL_ENV = "_".join(("RUNPOD", "API", "KEY"))
 
 
 def _executable(path: Path, source: str) -> None:
@@ -439,7 +440,7 @@ def test_worker_runtime_preflight_is_hardened_exact_and_before_remote_work(
         FAKE_REQUIRE_ANONYMOUS_REGISTRY="1",
         FAKE_REQUIRE_KEY_ISOLATION="1",
     )
-    environment["RUNPOD_" + "API_KEY"] = "fake-provider-key"
+    environment[PROVIDER_CREDENTIAL_ENV] = "fake-provider-key"
     environment["DOCKER_" + "AUTH_CONFIG"] = '{"auths":{"registry.invalid":{}}}'
     environment["REGISTRY_" + "AUTH_FILE"] = str(tmp_path / "must-not-be-read.json")
 
@@ -493,7 +494,7 @@ def test_worker_runtime_preflight_failure_has_no_provider_mutation_or_local_prep
         FAKE_CREATE_MODE="success",
         FAKE_WORKER_PREFLIGHT_FAIL="1",
     )
-    environment["RUNPOD_" + "API_KEY"] = "fake-provider-key"
+    environment[PROVIDER_CREDENTIAL_ENV] = "fake-provider-key"
 
     result = subprocess.run(  # noqa: S603
         _live_command(evidence_root),
@@ -788,7 +789,7 @@ def test_key_is_removed_from_external_nonprovider_children_and_evidence(
         FAKE_REQUIRE_ANONYMOUS_REGISTRY="1",
     )
     key_marker = f"key-sentinel-{tmp_path.name}"
-    environment["RUNPOD_" + "API_KEY"] = key_marker
+    environment[PROVIDER_CREDENTIAL_ENV] = key_marker
     environment["DOCKER_" + "AUTH_CONFIG"] = '{"auths":{"registry.invalid":{}}}'
     environment["REGISTRY_" + "AUTH_FILE"] = str(tmp_path / "must-not-be-read.json")
 
