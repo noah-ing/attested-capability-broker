@@ -27,6 +27,12 @@ jobs:
           version: "0.12.5"
           enable-cache: false
 
+      - name: Install TPM build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential libtss2-dev pkg-config
+
       - name: Audit locked core and worker dependencies
         run: |
           uv sync --frozen --extra dev
