@@ -25,6 +25,54 @@ from .tpm import TpmAppraiser, issuance_qualifying_data
 
 Clock = Callable[[], int]
 
+_ISSUANCE_REQUEST_STRING_FIELDS = (
+    "version",
+    "broker_id",
+    "challenge",
+    "manifest_digest",
+    "identity_key",
+    "holder_key",
+    "resource_issuer_kid",
+    "resource_issuer_key",
+    "requested_scope",
+    "identity_signature",
+)
+_TPM_EVIDENCE_BYTES_FIELDS = ("attest", "signature", "ak_chain_pem")
+_MISSING = object()
+
+
+def _validate_issuance_request_runtime(request: IssuanceRequest) -> IssuanceRequest:
+    """Reject malformed in-memory request models before hashing or verification."""
+
+    if type(request) is not IssuanceRequest:
+        raise DecisionError(
+            Reason.REQUEST_BINDING,
+            "issuance request has an invalid runtime type",
+        )
+    for field_name in _ISSUANCE_REQUEST_STRING_FIELDS:
+        value = getattr(request, field_name, _MISSING)
+        if type(value) is not str:
+            raise DecisionError(
+                Reason.REQUEST_BINDING,
+                f"issuance request field {field_name} must be a string",
+            )
+    return request
+
+
+def _validate_tpm_evidence_runtime(evidence: TpmEvidence) -> TpmEvidence:
+    """Reject malformed in-memory evidence models before hashing or appraisal."""
+
+    if type(evidence) is not TpmEvidence:
+        raise DecisionError(Reason.TPM_INVALID, "TPM evidence has an invalid runtime type")
+    for field_name in _TPM_EVIDENCE_BYTES_FIELDS:
+        value = getattr(evidence, field_name, _MISSING)
+        if type(value) is not bytes:
+            raise DecisionError(
+                Reason.TPM_INVALID,
+                f"TPM evidence field {field_name} must be bytes",
+            )
+    return evidence
+
 
 def credential_to_dict(credential: DelegationCredential) -> dict[str, Any]:
     return {**credential.body(), "signature": credential.signature}
@@ -88,13 +136,18 @@ class CapabilityBroker:
         manifest: dict[str, Any],
         tpm_evidence: TpmEvidence,
     ) -> Decision:
-        token_hash = challenge_token_hash(request.challenge)
-        artifact_hashes = {
-            **tpm_evidence.digestable(),
-            "broker_policy_sha256": canonical_digest(self.policy.public_dict()),
-            "issuance_request_sha256": canonical_digest(request.to_dict()),
-        }
+        token_hash: str | None = None
+        manifest_digest: str | None = None
+        artifact_hashes: dict[str, str] = {}
         try:
+            artifact_hashes["broker_policy_sha256"] = canonical_digest(self.policy.public_dict())
+            request = _validate_issuance_request_runtime(request)
+            manifest_digest = request.manifest_digest
+            token_hash = challenge_token_hash(request.challenge)
+            tpm_evidence = _validate_tpm_evidence_runtime(tpm_evidence)
+            artifact_hashes.update(tpm_evidence.digestable())
+            artifact_hashes["issuance_request_sha256"] = canonical_digest(request.to_dict())
+
             try:
                 verify_challenge(self.challenge_secret, request.challenge, now=self.clock())
             except AttestationFailed as exc:
@@ -133,7 +186,7 @@ class CapabilityBroker:
                 reason=Reason.ALLOW,
                 credential_id=credential.credential_id,
                 challenge_hash=token_hash,
-                manifest_digest=request.manifest_digest,
+                manifest_digest=manifest_digest,
                 artifact_hashes=artifact_hashes,
             )
             return Decision(
@@ -148,7 +201,7 @@ class CapabilityBroker:
                 reason=exc.reason,
                 credential_id=None,
                 challenge_hash=token_hash,
-                manifest_digest=request.manifest_digest,
+                manifest_digest=manifest_digest,
                 artifact_hashes=artifact_hashes,
             )
             return Decision(False, exc.reason, receipt)
@@ -158,7 +211,7 @@ class CapabilityBroker:
                 reason=Reason.INTERNAL_ERROR,
                 credential_id=None,
                 challenge_hash=token_hash,
-                manifest_digest=request.manifest_digest,
+                manifest_digest=manifest_digest,
                 artifact_hashes=artifact_hashes,
             )
             return Decision(False, Reason.INTERNAL_ERROR, receipt)
@@ -169,8 +222,8 @@ class CapabilityBroker:
         decision: Literal["allow", "deny"],
         reason: Reason,
         credential_id: str | None,
-        challenge_hash: str,
-        manifest_digest: str,
+        challenge_hash: str | None,
+        manifest_digest: str | None,
         artifact_hashes: dict[str, str],
     ) -> SignedDecisionReceipt:
         payload = DecisionReceiptPayload(

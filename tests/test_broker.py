@@ -3,20 +3,24 @@
 from __future__ import annotations
 
 import copy
+import json
 import sqlite3
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from typing import cast
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import atcap.broker as broker_module
 from atcap.canonical import canonical_digest, challenge_token_hash
 from atcap.errors import DecisionError, Reason
 from atcap.manifest_verifier import signed_manifest_digest, verify_signed_manifest
-from atcap.models import TpmEvidence
+from atcap.models import IssuanceRequest, TpmEvidence
 from atcap.policy import TpmPolicy
+from atcap.tpm import TestTpmAppraiser as AcceptedTpmAppraiser
 
 from .support import Harness
 
@@ -127,6 +131,309 @@ class PcrRejectingAppraiser:
     ) -> None:
         del evidence, expected_qualifying_data, policy
         raise DecisionError(Reason.PCR_POLICY, "signed PCR selection is unapproved")
+
+
+@dataclass
+class RecordingAppraiser:
+    """Record whether issuance reached appraisal without inspecting evidence."""
+
+    called: bool = False
+
+    def appraise(
+        self,
+        evidence: TpmEvidence,
+        *,
+        expected_qualifying_data: bytes,
+        policy: TpmPolicy,
+    ) -> None:
+        del evidence, expected_qualifying_data, policy
+        self.called = True
+
+
+@dataclass(frozen=True)
+class UnexpectedFailureAppraiser:
+    """Raise an unexpected dependency failure carrying a leak-detection marker."""
+
+    marker: str
+
+    def appraise(
+        self,
+        evidence: TpmEvidence,
+        *,
+        expected_qualifying_data: bytes,
+        policy: TpmPolicy,
+    ) -> None:
+        del evidence, expected_qualifying_data, policy
+        raise RuntimeError(self.marker)
+
+
+@dataclass(frozen=True)
+class RuntimeLeakMarker:
+    """Malformed public-boundary value whose rendering must never escape."""
+
+    marker: str
+
+    def __str__(self) -> str:
+        return self.marker
+
+    def __repr__(self) -> str:
+        return self.marker
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "version",
+        "broker_id",
+        "challenge",
+        "manifest_digest",
+        "identity_key",
+        "holder_key",
+        "resource_issuer_kid",
+        "resource_issuer_key",
+        "requested_scope",
+        "identity_signature",
+    ],
+)
+def test_malformed_issuance_request_field_is_signed_without_consuming_challenge(
+    field_name: str,
+    harness: Harness,
+) -> None:
+    challenge = harness.broker.new_challenge()
+    valid_request = harness.endorsed_request(challenge)
+    malformed_request = replace(valid_request)
+    marker = f"RUNTIME_REQUEST_VALUE_MUST_NOT_ESCAPE_{field_name}"
+    object.__setattr__(malformed_request, field_name, RuntimeLeakMarker(marker))
+
+    denied = harness.broker.issue(
+        malformed_request,
+        manifest=harness.manifest,
+        tpm_evidence=harness.accepted_evidence,
+    )
+
+    assert denied.allowed is False
+    assert denied.reason == Reason.REQUEST_BINDING
+    assert denied.result is None
+    payload = harness.broker_receipts.verify(denied.receipt)
+    assert payload.decision == "deny"
+    assert payload.reason == Reason.REQUEST_BINDING
+    assert payload.challenge_token_hash is None
+    assert payload.manifest_digest is None
+    exposed = json.dumps(denied.to_dict(), sort_keys=True) + payload.model_dump_json()
+    assert marker not in exposed
+
+    # Runtime model rejection happens before the one-time challenge spend.
+    allowed = harness.broker.issue(
+        valid_request,
+        manifest=harness.manifest,
+        tpm_evidence=harness.accepted_evidence,
+    )
+    assert allowed.allowed is True
+
+
+def test_non_request_runtime_object_is_signed_without_consuming_challenge(
+    harness: Harness,
+) -> None:
+    challenge = harness.broker.new_challenge()
+    valid_request = harness.endorsed_request(challenge)
+    marker = "NON_REQUEST_RUNTIME_OBJECT_MUST_NOT_ESCAPE"
+
+    denied = harness.broker.issue(
+        cast(IssuanceRequest, RuntimeLeakMarker(marker)),
+        manifest=harness.manifest,
+        tpm_evidence=harness.accepted_evidence,
+    )
+
+    assert denied.allowed is False
+    assert denied.reason == Reason.REQUEST_BINDING
+    payload = harness.broker_receipts.verify(denied.receipt)
+    assert payload.reason == Reason.REQUEST_BINDING
+    assert payload.challenge_token_hash is None
+    assert marker not in (json.dumps(denied.to_dict()) + payload.model_dump_json())
+    assert harness.broker.issue(
+        valid_request,
+        manifest=harness.manifest,
+        tpm_evidence=harness.accepted_evidence,
+    ).allowed
+
+
+@pytest.mark.parametrize("field_name", ["attest", "signature", "ak_chain_pem"])
+def test_malformed_tpm_evidence_field_is_signed_without_consuming_challenge(
+    field_name: str,
+    harness: Harness,
+) -> None:
+    challenge = harness.broker.new_challenge()
+    request = harness.endorsed_request(challenge)
+    malformed_evidence = replace(harness.accepted_evidence)
+    marker = f"RUNTIME_TPM_VALUE_MUST_NOT_ESCAPE_{field_name}"
+    object.__setattr__(malformed_evidence, field_name, RuntimeLeakMarker(marker))
+
+    denied = harness.broker.issue(
+        request,
+        manifest=harness.manifest,
+        tpm_evidence=malformed_evidence,
+    )
+
+    assert denied.allowed is False
+    assert denied.reason == Reason.TPM_INVALID
+    assert denied.result is None
+    payload = harness.broker_receipts.verify(denied.receipt)
+    assert payload.decision == "deny"
+    assert payload.reason == Reason.TPM_INVALID
+    assert payload.challenge_token_hash == challenge_token_hash(challenge)
+    assert payload.manifest_digest == request.manifest_digest
+    exposed = json.dumps(denied.to_dict(), sort_keys=True) + payload.model_dump_json()
+    assert marker not in exposed
+
+    # Invalid evidence is rejected before appraisal and the challenge spend.
+    allowed = harness.broker.issue(
+        request,
+        manifest=harness.manifest,
+        tpm_evidence=harness.accepted_evidence,
+    )
+    assert allowed.allowed is True
+
+
+def test_non_evidence_runtime_object_is_signed_without_consuming_challenge(
+    harness: Harness,
+) -> None:
+    challenge = harness.broker.new_challenge()
+    request = harness.endorsed_request(challenge)
+    marker = "NON_EVIDENCE_RUNTIME_OBJECT_MUST_NOT_ESCAPE"
+
+    denied = harness.broker.issue(
+        request,
+        manifest=harness.manifest,
+        tpm_evidence=cast(TpmEvidence, RuntimeLeakMarker(marker)),
+    )
+
+    assert denied.allowed is False
+    assert denied.reason == Reason.TPM_INVALID
+    payload = harness.broker_receipts.verify(denied.receipt)
+    assert payload.reason == Reason.TPM_INVALID
+    assert payload.challenge_token_hash == challenge_token_hash(challenge)
+    assert marker not in (json.dumps(denied.to_dict()) + payload.model_dump_json())
+    assert harness.broker.issue(
+        request,
+        manifest=harness.manifest,
+        tpm_evidence=harness.accepted_evidence,
+    ).allowed
+
+
+def test_unexpected_manifest_verifier_failure_is_signed_and_does_not_leak(
+    harness_factory: Callable[..., Harness],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    appraiser = RecordingAppraiser()
+    harness = harness_factory(tpm_appraiser=appraiser)
+    challenge = harness.broker.new_challenge()
+    request = harness.endorsed_request(challenge)
+    manifest_marker = "RAW_MANIFEST_MATERIAL_MUST_NOT_ESCAPE"
+    exception_marker = "manifest verifier dependency exposed private material"
+    marked_manifest = {"private_manifest_material": manifest_marker}
+    marked_evidence = TpmEvidence(
+        attest=b"RAW_TPM_ATTEST_MUST_NOT_ESCAPE",
+        signature=b"RAW_TPM_SIGNATURE_MUST_NOT_ESCAPE",
+        ak_chain_pem=b"RAW_AK_CHAIN_MUST_NOT_ESCAPE",
+    )
+
+    def fail_manifest_verification(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError(exception_marker)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(broker_module, "verify_signed_manifest", fail_manifest_verification)
+        decision = harness.broker.issue(
+            request,
+            manifest=marked_manifest,
+            tpm_evidence=marked_evidence,
+        )
+
+    assert decision.allowed is False
+    assert decision.reason == Reason.INTERNAL_ERROR
+    assert decision.result is None
+    assert appraiser.called is False
+    payload = harness.broker_receipts.verify(decision.receipt)
+    assert payload.decision == "deny"
+    assert payload.reason == Reason.INTERNAL_ERROR
+    assert payload.handler_invoked is False
+    assert payload.business_result == "not_applicable"
+    exposed = json.dumps(decision.to_dict(), sort_keys=True) + payload.model_dump_json()
+    private_markers = (
+        exception_marker,
+        manifest_marker,
+        challenge,
+        request.identity_signature,
+        request.identity_key,
+        request.holder_key,
+        request.resource_issuer_key,
+        harness.broker.challenge_secret.hex(),
+        harness.identity_private.private_bytes_raw().hex(),
+        harness.broker_issuer_private.private_bytes_raw().hex(),
+        *(item.decode() for item in marked_evidence.__dict__.values()),
+    )
+    assert all(marker not in exposed for marker in private_markers)
+
+    # The unexpected pre-appraisal failure did not consume the bearer challenge.
+    allowed = harness.broker.issue(
+        request,
+        manifest=harness.manifest,
+        tpm_evidence=marked_evidence,
+    )
+    assert allowed.allowed is True
+    assert appraiser.called is True
+
+
+def test_unexpected_tpm_appraiser_failure_is_signed_and_does_not_leak(
+    harness_factory: Callable[..., Harness],
+) -> None:
+    exception_marker = "TPM dependency failure included secret key material"
+    harness = harness_factory(tpm_appraiser=UnexpectedFailureAppraiser(exception_marker))
+    challenge = harness.broker.new_challenge()
+    request = harness.endorsed_request(challenge)
+    marked_evidence = TpmEvidence(
+        attest=b"RAW_TPM_ATTEST_ON_FAILURE",
+        signature=b"RAW_TPM_SIGNATURE_ON_FAILURE",
+        ak_chain_pem=b"RAW_AK_CHAIN_ON_FAILURE",
+    )
+
+    decision = harness.broker.issue(
+        request,
+        manifest=harness.manifest,
+        tpm_evidence=marked_evidence,
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == Reason.INTERNAL_ERROR
+    assert decision.result is None
+    payload = harness.broker_receipts.verify(decision.receipt)
+    assert payload.decision == "deny"
+    assert payload.reason == Reason.INTERNAL_ERROR
+    assert payload.credential_id is None
+    exposed = json.dumps(decision.to_dict(), sort_keys=True) + payload.model_dump_json()
+    private_markers = (
+        exception_marker,
+        challenge,
+        request.identity_signature,
+        request.identity_key,
+        request.holder_key,
+        request.resource_issuer_key,
+        str(harness.manifest["manifest_id"]),
+        harness.broker.challenge_secret.hex(),
+        harness.identity_private.private_bytes_raw().hex(),
+        harness.broker_issuer_private.private_bytes_raw().hex(),
+        *(item.decode() for item in marked_evidence.__dict__.values()),
+    )
+    assert all(marker not in exposed for marker in private_markers)
+
+    # An unexpected appraisal failure is still non-mutating.
+    harness.broker.tpm_appraiser = AcceptedTpmAppraiser(marked_evidence)
+    allowed = harness.broker.issue(
+        request,
+        manifest=harness.manifest,
+        tpm_evidence=marked_evidence,
+    )
+    assert allowed.allowed is True
 
 
 def test_wrong_pcr_state_is_denied(

@@ -74,6 +74,7 @@ exclude = [
 [tool.hatch.build.targets.sdist]
 include = [
   "/.dockerignore",
+  "/.gitignore",
   "/Dockerfile",
   "/LICENSE",
   "/README.md",
@@ -97,6 +98,16 @@ pythonpath = ["src"]
 markers = [
   "swtpm: requires Linux swtpm and tpm2-tools",
 ]
+
+[tool.coverage.run]
+branch = true
+source = ["atcap"]
+
+[tool.coverage.report]
+fail_under = 85.0
+precision = 2
+show_missing = true
+skip_covered = true
 
 [tool.ruff]
 target-version = "py312"

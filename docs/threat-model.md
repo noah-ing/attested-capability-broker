@@ -141,19 +141,29 @@ exactly-once claim is made. Recovery means obtaining a new credential, not
 unspending the old one.
 
 A handler exception after that boundary is reported as an authorized but failed
-execution, not as an authorization denial. If receipt signing fails after the
-handler runs, the API raises a post-invocation error carrying invocation state;
-it does not manufacture a denial that could mislead a caller into retrying as if
-authorization had never been consumed.
+execution, not as an authorization denial. Raw successful output must pass the
+strict, extra-forbidden `InventoryLookupResult` boundary, which emits only `sku`,
+`quantity`, and the server-assigned `invocation_number`. A malformed, extra-field,
+or non-JSON-safe handler result becomes a signed `allow` / `HANDLER_FAILED`
+execution state without exposing raw output. If receipt signing fails after the
+handler runs, including after malformed output, the MCP boundary returns a closed,
+explicitly unsigned post-invocation error carrying the invocation ID and
+completion state. It is not an authenticated receipt and does not manufacture a
+denial that could mislead a caller into retrying as if authorization had never
+been consumed.
 
 ### Receipt policy commitments
 
-The signed broker receipt hashes raw TPM evidence, the complete issuance request,
-and a canonical public policy projection. That projection covers broker ID,
-scope, resource issuer key and key ID, time-to-live values, manifest identity and
-artifact bindings, PCR selection/digest, and a hash of the trusted-root PEM. The
-resource receipt hashes a projection covering its audience, method, scope,
-trusted broker key, challenge TTL, and maximum credential lifetime.
+On normal runtime-shape-validated input paths, the signed broker receipt hashes
+raw TPM evidence, the complete issuance request, and a canonical public policy
+projection. That projection covers broker ID, scope, resource issuer key and key
+ID, time-to-live values, manifest identity and artifact bindings, PCR
+selection/digest, and a hash of the trusted-root PEM. Runtime-malformed denials
+include only safely derived hashes: an unavailable or not runtime-shape-validated
+input artifact hash is omitted rather than fabricated, while policy and
+already-validated bindings may remain. The resource receipt hashes a projection
+covering its audience, method, scope, trusted broker key, challenge TTL, and
+maximum credential lifetime.
 
 Receipt verification is strict and extra-forbidden after JWS authentication, so
 signed JSON types are not coerced and decision/reason/execution combinations must
