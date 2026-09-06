@@ -88,7 +88,7 @@ def _require_current(
 ) -> None:
     if (
         evaluation_time < certificate.not_valid_before_utc
-        or evaluation_time > certificate.not_valid_after_utc
+        or evaluation_time >= certificate.not_valid_after_utc
     ):
         raise AkCertificatePolicyError(f"{role} certificate is outside its validity window")
 
@@ -106,8 +106,9 @@ def enforce_synthetic_ak_certificate_policy(
     validity and role constraints needed by the synthetic test profile. It does
     not apply validity windows to the terminal or configured trust anchors, and
     it does not authenticate certificate signatures or select/match a configured
-    trust anchor. Those checks, plus AK quote verification, remain in the released
-    Agent Manifest ``verify_tpm_quote`` path invoked after this guard.
+    trust anchor. The released Agent Manifest ``verify_tpm_quote`` path checks
+    validity of every chain certificate (including its terminal root), chain
+    signatures, configured-root trust, and the quote after this guard.
     """
 
     if not isinstance(evaluation_time, datetime):
@@ -195,7 +196,7 @@ def tpm2_pytss_selection_reader(
 
 @dataclass(frozen=True)
 class ReleasedTpmAppraiser:
-    """Fail-closed adapter around Agent Manifest 0.11.2's TPM API.
+    """Fail-closed adapter around Agent Manifest 0.12.0's TPM API.
 
     The released verifier authenticates the quote, AK chain, qualifying data,
     and composite PCR digest. It does not expose the signed PCR selection, so a
@@ -221,11 +222,15 @@ class ReleasedTpmAppraiser:
         if selection != policy.selection:
             raise DecisionError(Reason.PCR_POLICY, "signed TPM PCR selection is not approved")
         try:
+            # Both policy layers evaluate the same instant, including when a
+            # deterministic clock is injected for a synthetic certificate chain.
+            evaluation_time = self.evaluation_time()
             enforce_synthetic_ak_certificate_policy(
                 ak_chain_pem=evidence.ak_chain_pem,
                 trusted_roots_pem=policy.trusted_roots_pem,
-                evaluation_time=self.evaluation_time(),
+                evaluation_time=evaluation_time,
             )
+            evaluation_time = evaluation_time.astimezone(UTC)
         except Exception as exc:
             raise DecisionError(
                 Reason.TPM_UNTRUSTED,
@@ -239,6 +244,7 @@ class ReleasedTpmAppraiser:
                 trusted_roots_pem=policy.trusted_roots_pem,
                 expected_qualifying_data=expected_qualifying_data,
                 expected_pcr_digest=policy.expected_pcr_digest,
+                verification_time=evaluation_time,
             )
         except TpmVerificationError as exc:
             message = str(exc).lower()

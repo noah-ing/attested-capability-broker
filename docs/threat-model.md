@@ -237,10 +237,11 @@ For every denial, the observable handler invocation count must remain unchanged.
 
 ## Dependency and certificate-policy boundary
 
-Released Agent Manifest `0.11.2` supplies its documented manifest and TPM quote
-behavior, including certificate-signature and configured-root checks. This
-experiment does not attribute production PKIX policy validation to that release.
-Instead, `enforce_synthetic_ak_certificate_policy` independently and fail-closed
+Released Agent Manifest `0.12.0` supplies its documented manifest and TPM quote
+behavior, including chain validity, issuer policy, certificate-signature, and
+configured-root checks. This experiment does not attribute complete production
+PKIX validation to that release. The retained
+`enforce_synthetic_ak_certificate_policy` independently and fail-closed
 checks the supplied leaf-first synthetic chain for:
 
 - leaf and non-anchor-intermediate validity at an injected evaluation time;
@@ -252,15 +253,25 @@ Missing, malformed, or incompatible policy inputs are rejected before the
 released quote verifier runs. Signature verification, root trust, and TPM quote
 verification remain in that released path.
 
-The repository policy deliberately does not evaluate the validity window of the
+The local guard deliberately does not evaluate the validity window of the
 terminal chain certificate or configured trust-anchor certificates. Their CA
-BasicConstraints and `keyCertSign` remain mandatory, and released verification
-still performs certificate-chain signature and configured-root fingerprint
-checks.
+BasicConstraints and `keyCertSign` remain mandatory. The composed appraisal is
+stricter: Agent Manifest `0.12.0` checks the validity of every supplied chain
+certificate, including the terminal root, and performs chain-signature and
+configured-root fingerprint checks. Both layers evaluate the same captured
+instant, passed to released verification as UTC-aware `verification_time`.
+Time checks use an inclusive `notBefore` and exclusive `notAfter`; an expired
+terminal root is not accepted merely because the local guard ignores its time.
+
+The local guard remains necessary for the experiment's mandatory non-CA leaf,
+leaf `digitalSignature`/no-`keyCertSign`, and required CA KeyUsage policy. The
+dependency upgrade does not enable manifest-level hardware attestation: the
+manifest wrapper verifies signed artifact bindings, issuer, key and digest,
+while the separate quote binds the issuance request, not manifest execution.
 
 This composition is deliberately narrower than production PKIX validation. It
 does not claim revocation checking, complete RFC 5280 policy or name-constraints
-processing, certificate algorithm or trust-anchor-expiry policy, arbitrary path
+processing, certificate algorithm or general trust-anchor lifecycle policy, arbitrary path
 discovery/reordering, manufacturer enrollment, hardware provenance, or
 certificate lifecycle operations. A production design would need an
 enrollment-specific policy and a maintained path-validation strategy appropriate
