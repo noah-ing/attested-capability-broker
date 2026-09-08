@@ -57,13 +57,15 @@ public key and expected key ID, not a key delivered alongside a receipt.
 The relevant dependencies are exact-pinned in `pyproject.toml` and resolved in
 `uv.lock`.
 
-- **Agent Manifest `0.11.2`.** The repository's `verify_signed_manifest` wrapper
+- **Agent Manifest `0.12.0`.** The repository's `verify_signed_manifest` wrapper
   first normalizes through released `Manifest`, checks the configured issuer and
   digest, constructs a strict `VerificationContext`, calls released
   `verify_manifest`, then requires both
   `result.result is OverallResult.VALID` and
   `result.signature_verified is True`. Merely receiving a truthy result is not
-  enough.
+  enough. Manifest-level hardware attestation is not enabled: the separately
+  verified issuance-transcript quote must not be represented as a verified
+  manifest-attestation binding or proof of manifest execution.
 - **cryptography `50.0.1` synthetic AK policy.** Before released quote
   verification, `enforce_synthetic_ak_certificate_policy` parses the supplied
   leaf-first chain and configured roots with
@@ -75,9 +77,12 @@ The relevant dependencies are exact-pinned in `pyproject.toml` and resolved in
   `keyCertSign` for every issuer and configured root, and intermediate path-length
   limits. Missing, malformed, or policy-incompatible inputs fail closed.
 
-  The profile deliberately does not evaluate the validity window of the terminal
-  chain certificate or configured trust anchors; it still enforces their CA role
-  and `keyCertSign`. This is not a general PKIX engine: it does not establish
+  The local profile does not evaluate the validity window of the terminal chain
+  certificate or configured trust anchors; it still enforces their CA role
+  and `keyCertSign`. Agent Manifest `0.12.0` checks every supplied chain
+  certificate's validity, including the terminal root. Both layers use
+  `notBefore <= time < notAfter` where they apply time checks. This is not a
+  general PKIX engine: the local guard does not establish
   trust-anchor equality, verify signatures, build arbitrary paths, check
   revocation, apply a trust-anchor expiry policy, or process the full RFC 5280
   policy surface. Certificate signatures and configured-root fingerprint trust
@@ -85,10 +90,25 @@ The relevant dependencies are exact-pinned in `pyproject.toml` and resolved in
 - **Agent Manifest TPM API.** `ReleasedTpmAppraiser.appraise` parses the signed
   PCR selection with `tpm2-pytss`, requires its exact equality to policy, runs
   the narrow certificate-policy guard, then calls `verify_tpm_quote(...)` with
-  the configured roots, qualifying data, and PCR digest. It accepts only the
+  the configured roots, qualifying data, PCR digest, and `verification_time`.
+  One clock snapshot is checked by the local guard and normalized to UTC for
+  the released verifier, so deterministic fixtures do not fall back to host
+  wall-clock time. The local guard is retained because the release does not
+  enforce all of this experiment's mandatory leaf-role/KeyUsage constraints.
+  It accepts only the
   singleton boolean result `is True`; a truthy non-boolean fails closed. The
   released API does not surface the signed PCR selection, hence the separate
   standards-backed parse.
+
+  Release-specific source references:
+  [`verify_tpm_quote` and AK-chain delegation](https://github.com/agentrust-io/agent-manifest/blob/python-v0.12.0/python/src/agent_manifest/_tpm_verify.py),
+  [shared chain validity and issuer policy](https://github.com/agentrust-io/agent-manifest/blob/python-v0.12.0/python/src/agent_manifest/_cert_chain.py).
+
+  This is a clean-fixture migration, not an automatic migration of persisted
+  signed manifests or policy digests. Version `0.12.0` also corrects
+  [number formatting and UTF-16 key ordering](https://github.com/agentrust-io/agent-manifest/blob/python-v0.12.0/python/src/agent_manifest/_canonicalize.py).
+  Revalidate existing signatures and approved digest pins containing affected
+  values before deployment; do not rewrite signed data to force acceptance.
 - **cA2A Runtime `0.2.0`.** Broker and resource tokens use the documented
   `v1.<expiry>.<random>.<HMAC-SHA256>` challenge wire shape. The small
   `issue_ca2a_challenge_at` adapter exists only to inject the same testable clock
@@ -194,7 +214,8 @@ Implementation anchors:
 | Protocol version and holder public-key shape are explicit | `verify_identity_endorsement`; `_ISSUANCE_VERSION`; `_ED25519_PUBLIC_HEX_RE` | `test_unsupported_issuance_request_version_is_denied`; `test_identity_endorsed_malformed_holder_key_is_denied` |
 | Runtime-malformed broker request/evidence objects are rejected before that malformed object is input-hashed, appraised, or can cause challenge spend; policy and already-validated safe bindings may already be derived | `_validate_issuance_request_runtime`; `_validate_tpm_evidence_runtime`; `CapabilityBroker.issue` fail-closed preparation | `test_malformed_issuance_request_field_is_signed_without_consuming_challenge`; `test_non_request_runtime_object_is_signed_without_consuming_challenge`; `test_malformed_tpm_evidence_field_is_signed_without_consuming_challenge`; `test_non_evidence_runtime_object_is_signed_without_consuming_challenge` |
 | Synthetic AK certificate policy is checked before released quote verification | `enforce_synthetic_ak_certificate_policy`; `ReleasedTpmAppraiser.appraise` ordering | `test_local_ak_policy_rejects_before_released_quote_verification`; `test_local_ak_policy_fails_closed_on_missing_or_malformed_pem`; `test_local_ak_policy_requires_role_extensions`; `test_local_ak_policy_rejects_naive_evaluation_time`; `test_real_swtpm_ak_certificate_and_signature_denials` |
-| Validity applies to the leaf and non-anchor intermediates, not terminal/configured trust anchors | `_require_current`; terminal-index exclusion; configured-root policy loop | `test_local_ak_policy_does_not_apply_validity_to_trust_anchors`; `test_local_ak_policy_rejects_before_released_quote_verification[expired-intermediate]`; `test_local_ak_policy_rejects_before_released_quote_verification[not-yet-valid-intermediate]` |
+| Both certificate-policy layers evaluate one instant; leaf/intermediate expiry is exclusive | `ReleasedTpmAppraiser.appraise`; `_require_current`; released `verification_time` parameter | `test_released_adapter_uses_one_normalized_certificate_clock_snapshot`; `test_released_adapter_passes_all_policy_bindings_and_requires_true`; `test_local_ak_policy_rejects_exact_not_after` |
+| Local-guard validity applies to leaf/intermediates; released verification additionally enforces terminal-root validity | `_require_current`; local terminal-index exclusion; released `verify_tpm_quote` | `test_local_ak_policy_does_not_apply_validity_to_trust_anchors`; `test_local_ak_policy_rejects_before_released_quote_verification[expired-intermediate]`; `test_real_swtpm_ak_certificate_and_signature_denials[expired-root-TPM_UNTRUSTED]` |
 | Quote selection and values are exact and verifier result is literally `True` | `tpm2_pytss_selection_reader`; `ReleasedTpmAppraiser.appraise` | `test_released_adapter_passes_all_policy_bindings_and_requires_true`; `test_truthy_non_boolean_tpm_result_fails_closed`; `test_wrong_signed_pcr_selection_fails_before_quote_acceptance`; `test_real_swtpm_quote_drives_broker_allow_and_rejects_bad_policy` |
 | Appraisal precedes broker challenge spend | `CapabilityBroker.issue` ordering; `SQLiteStore.consume_broker_challenge` | `test_failed_appraisal_does_not_burn_broker_challenge` |
 | Clock-injected challenges retain the released cA2A wire and expiry semantics | `issue_ca2a_challenge_at`; released `verify_challenge` self-check | `test_clock_injected_challenge_has_exact_ca2a_shape_and_expiry` |
@@ -230,11 +251,18 @@ uses a genuine software-TPM AK and quote for every profile.
 `leaf-key-cert-sign` keeps `digitalSignature=true` while adding the forbidden
 `keyCertSign=true` to the AK leaf.
 
+The release-upgrade profiles `expired-root`, `not-yet-valid-root`, and
+`root-not-after` pass the unchanged local root-time exemption but are rejected
+by released verification, using genuine software-TPM quotes at the injected
+evaluation time. They exercise the composed policy, not a monkeypatched
+upstream verifier. The valid-quote control uses the same injected time.
+
 | Attack or failure | Expected result | Exact pytest evidence |
 |---|---|---|
 | Untrusted/modified TPM evidence | `TPM_UNTRUSTED` or fail-closed TPM error | `test_untrusted_tpm_evidence_is_denied_and_receipted`; production adapter coverage in `test_real_swtpm_quote_drives_broker_allow_and_rejects_bad_policy` |
 | Expired/not-yet-valid AK leaf or non-anchor intermediate, CA-role/path-length violations, incompatible leaf/CA KeyUsage, or malformed certificate input | `TPM_UNTRUSTED` before released verification | `test_local_ak_policy_rejects_before_released_quote_verification`; `test_local_ak_policy_fails_closed_on_missing_or_malformed_pem`; `test_real_swtpm_ak_certificate_and_signature_denials` |
 | Tampered certificate-chain or quote signature | `TPM_UNTRUSTED` / `TPM_INVALID` from released verification before issuance | `test_parseable_tampered_chain_signature_reaches_released_verifier`; `test_real_swtpm_ak_certificate_and_signature_denials` |
+| Expired/not-yet-valid terminal root, including exactly `notAfter` | `TPM_UNTRUSTED` from Agent Manifest 0.12.0 after the local guard | `test_real_swtpm_ak_certificate_and_signature_denials` with `expired-root`, `not-yet-valid-root`, and `root-not-after` |
 | Wrong PCR selection or digest | `PCR_POLICY` / `TPM_INVALID` | `test_wrong_pcr_state_is_denied`; `test_wrong_signed_pcr_selection_fails_before_quote_acceptance`; `test_real_swtpm_quote_drives_broker_allow_and_rejects_bad_policy` |
 | Stale broker challenge | `CHALLENGE_STALE` | `test_stale_broker_challenge_is_denied`; `test_broker_challenge_expiring_while_waiting_for_sqlite_lock_is_not_used` |
 | Consumed/raced broker challenge | `CHALLENGE_CONSUMED`; only one credential | `test_consumed_broker_challenge_cannot_be_reused`; `test_two_issuances_racing_one_broker_challenge_mint_exactly_one_credential` |

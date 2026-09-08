@@ -90,9 +90,9 @@ indexed in the [audit guide](docs/audit-guide.md).
 
 Released dependencies are used for their documented behavior:
 
-- [Agent Manifest `0.11.2`](https://github.com/agentrust-io/agent-manifest/releases/tag/python-v0.11.2)
+- [Agent Manifest `0.12.0`](https://github.com/agentrust-io/agent-manifest/releases/tag/python-v0.12.0)
   verifies the signed manifest and supplies the configured-root, AK-chain
-  signature, qualifying-data, PCR-digest, and TPM-quote checks;
+  certificate-policy/signature, qualifying-data, PCR-digest, and TPM-quote checks;
 - [cA2A Runtime `0.2.0`](https://github.com/agentrust-io/ca2a/releases/tag/v0.2.0)
   supplies credential, challenge, and holder-proof behavior; and
 - the [`mcp` Python SDK `2.1.1`](https://github.com/modelcontextprotocol/python-sdk/releases/tag/v2.1.1)
@@ -106,15 +106,29 @@ BasicConstraints on issuers and configured roots, intermediate path-length
 compliance, `keyCertSign` on CAs, and a non-CA AK leaf with `digitalSignature` and
 without `keyCertSign`.
 
-The repository profile deliberately does not evaluate the validity window of the
-terminal chain certificate or configured trust-anchor certificates. It still
-requires their CA BasicConstraints and `keyCertSign`. The released Agent Manifest
-path remains responsible for certificate-chain signatures, configured-root
-fingerprint trust, and TPM quote verification.
+The local guard is retained after the dependency upgrade: its mandatory leaf-role
+and KeyUsage requirements are stricter than the released chain policy. Both
+layers use one captured, UTC-normalized evaluation time; the adapter passes it
+through the released `verification_time` parameter. Leaf/intermediate validity
+uses `notBefore <= time < notAfter`.
+
+The local guard itself does not apply validity windows to terminal or configured
+trust anchors. Agent Manifest `0.12.0` additionally checks the validity window
+of every certificate in the supplied chain, including its terminal root, using
+the same exclusive `notAfter` bound. An expired terminal root therefore fails
+the composed appraisal. Unused certificates in the configured root bundle are
+not a claim of a fully appraised enrollment inventory. Certificate-chain
+signatures, configured-root fingerprint trust, and TPM quote verification remain
+in the released path.
+
+The manifest wrapper still requires `OverallResult.VALID`, a verified signature,
+and the configured issuer, signer, artifact bindings, and manifest digest. It
+does not enable manifest-level hardware attestation or turn the issuance-transcript
+quote into proof of manifest execution. TPM appraisal remains a separate check.
 
 That division does not create a general PKIX engine. The guard does not claim
 revocation checking, certificate-policy or name-constraints processing,
-algorithm-policy enforcement, trust-anchor expiry policy, discovery or reordering
+algorithm-policy enforcement, general trust-anchor lifecycle management, discovery or reordering
 of arbitrary chains, manufacturer endorsement, hardware provenance, or production
 certificate lifecycle management. Its scope is only the caller-supplied,
 leaf-first synthetic chain and policy profile exercised here.
@@ -169,7 +183,7 @@ CA to issue a synthetic AK leaf around that public key. It exercises a real quot
 the actual signed PCR-selection parser, qualifying-data binding, configured-root
 and chain-signature verification, the narrow certificate-policy guard, PCR policy,
 and broker issuance. It also exercises real-quote negatives for leaf and
-intermediate certificate time, constraints, leaf and CA key usage, and tampered
+intermediate and terminal-root certificate time, constraints, leaf and CA key usage, and tampered
 certificate-chain and quote signatures. It does not model manufacturer
 enrollment, EK/AK certification, a hardware trust chain, or an operational AK
 issuance ceremony.

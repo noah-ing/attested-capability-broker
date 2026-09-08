@@ -18,7 +18,7 @@ classifiers = [
   "Topic :: Security",
 ]
 dependencies = [
-  "agent-manifest==0.11.2",
+  "agent-manifest==0.12.0",
   "ca2a-runtime==0.2.0",
   "cryptography==50.0.1",
   "joserfc==1.7.5",

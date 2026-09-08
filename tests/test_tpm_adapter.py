@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -213,7 +213,74 @@ def test_released_adapter_passes_all_policy_bindings_and_requires_true(
         "trusted_roots_pem": root_pem,
         "expected_qualifying_data": qualifying_data,
         "expected_pcr_digest": harness.policy.tpm.expected_pcr_digest,
+        "verification_time": _EVALUATION_TIME,
     }
+
+
+def test_released_adapter_uses_one_normalized_certificate_clock_snapshot(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chain_pem, root_pem = _valid_ak_material()
+    evidence = replace(harness.accepted_evidence, ak_chain_pem=chain_pem)
+    policy = replace(harness.policy.tpm, trusted_roots_pem=root_pem)
+    clock_reads = 0
+    captured_times: list[datetime] = []
+
+    def clock() -> datetime:
+        nonlocal clock_reads
+        clock_reads += 1
+        # A second read would cross the certificate validity window.
+        return (_EVALUATION_TIME + timedelta(days=clock_reads - 1)).astimezone(
+            timezone(timedelta(hours=5))
+        )
+
+    def accept(*args: Any, verification_time: datetime, **kwargs: Any) -> bool:
+        del args, kwargs
+        captured_times.append(verification_time)
+        return True
+
+    monkeypatch.setattr(tpm_module, "verify_tpm_quote", accept)
+    ReleasedTpmAppraiser(
+        selection_reader=lambda _attest: policy.selection,
+        evaluation_time=clock,
+    ).appraise(evidence, expected_qualifying_data=b"qualifying-data", policy=policy)
+
+    assert clock_reads == 1
+    assert captured_times == [_EVALUATION_TIME]
+    assert captured_times[0].tzinfo is UTC
+
+
+@pytest.mark.parametrize("expired_role", ["leaf", "intermediate"])
+def test_local_ak_policy_rejects_exact_not_after(expired_role: str) -> None:
+    root_key, root = _root()
+    intermediate_key, intermediate = _issued_certificate(
+        common_name="Synthetic intermediate",
+        issuer=root,
+        issuer_key=root_key,
+        ca=True,
+        path_length=0,
+        digital_signature=False,
+        key_cert_sign=True,
+        not_valid_after=(_EVALUATION_TIME if expired_role == "intermediate" else None),
+    )
+    _, leaf = _issued_certificate(
+        common_name="Synthetic leaf",
+        issuer=intermediate,
+        issuer_key=intermediate_key,
+        ca=False,
+        path_length=None,
+        digital_signature=True,
+        key_cert_sign=False,
+        not_valid_after=_EVALUATION_TIME if expired_role == "leaf" else None,
+    )
+
+    with pytest.raises(ValueError, match="outside its validity window"):
+        enforce_synthetic_ak_certificate_policy(
+            ak_chain_pem=_pem(leaf, intermediate, root),
+            trusted_roots_pem=_pem(root),
+            evaluation_time=_EVALUATION_TIME,
+        )
 
 
 def test_truthy_non_boolean_tpm_result_fails_closed(

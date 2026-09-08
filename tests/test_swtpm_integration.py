@@ -96,6 +96,8 @@ def _test_root(
     ca: bool = True,
     path_length: int | None = 3,
     key_cert_sign: bool = True,
+    not_valid_before: datetime | None = None,
+    not_valid_after: datetime | None = None,
 ) -> tuple[Ed25519PrivateKey, x509.Certificate]:
     private_key = Ed25519PrivateKey.generate()
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
@@ -105,8 +107,8 @@ def _test_root(
         .issuer_name(subject)
         .public_key(private_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(_CERTIFICATE_EVALUATION_TIME - timedelta(days=1))
-        .not_valid_after(_CERTIFICATE_EVALUATION_TIME + timedelta(days=1))
+        .not_valid_before(not_valid_before or _CERTIFICATE_EVALUATION_TIME - timedelta(days=1))
+        .not_valid_after(not_valid_after or _CERTIFICATE_EVALUATION_TIME + timedelta(days=1))
         .add_extension(
             x509.BasicConstraints(ca=ca, path_length=path_length if ca else None),
             critical=True,
@@ -259,6 +261,22 @@ def _issue_ak_chain(
         root_key, root = _test_root(
             "swtpm root without keyCertSign",
             key_cert_sign=False,
+        )
+        leaf_issuer = root
+        leaf_issuer_key = root_key
+    elif profile in {"expired-root", "not-yet-valid-root", "root-not-after"}:
+        root_not_before = _CERTIFICATE_EVALUATION_TIME - timedelta(days=1)
+        root_not_after = _CERTIFICATE_EVALUATION_TIME + timedelta(days=1)
+        if profile == "expired-root":
+            root_not_after = _CERTIFICATE_EVALUATION_TIME - timedelta(seconds=1)
+        elif profile == "root-not-after":
+            root_not_after = _CERTIFICATE_EVALUATION_TIME
+        else:
+            root_not_before = _CERTIFICATE_EVALUATION_TIME + timedelta(seconds=1)
+        root_key, root = _test_root(
+            "swtpm root outside released-verifier validity policy",
+            not_valid_before=root_not_before,
+            not_valid_after=root_not_after,
         )
         leaf_issuer = root
         leaf_issuer_key = root_key
@@ -698,6 +716,9 @@ def test_real_swtpm_quote_drives_broker_allow_and_rejects_bad_policy(
         ("leaf-key-usage", Reason.TPM_UNTRUSTED),
         ("leaf-key-cert-sign", Reason.TPM_UNTRUSTED),
         ("ca-key-usage", Reason.TPM_UNTRUSTED),
+        ("expired-root", Reason.TPM_UNTRUSTED),
+        ("not-yet-valid-root", Reason.TPM_UNTRUSTED),
+        ("root-not-after", Reason.TPM_UNTRUSTED),
         ("tampered-chain-signature", Reason.TPM_UNTRUSTED),
         ("tampered-quote-signature", Reason.TPM_INVALID),
     ],
@@ -720,15 +741,21 @@ def test_real_swtpm_ak_certificate_and_signature_denials(
 
         # Except for the intentionally tampered certificate signature, every
         # profile-negative chain remains cryptographically adjacent-valid. That
-        # keeps the genuine denial attributable to the named local policy rule.
+        # keeps the genuine denial attributable to the named policy rule.
         if profile != "tampered-chain-signature":
             certificates = x509.load_pem_x509_certificates(chain_pem)
             for child, issuer in pairwise(certificates):
                 child.verify_directly_issued_by(issuer)
 
-        if profile == "tampered-chain-signature":
-            # Signature authentication is intentionally not duplicated in the
-            # local profile guard; the released verifier must reject this.
+        if profile in {
+            "tampered-chain-signature",
+            "expired-root",
+            "not-yet-valid-root",
+            "root-not-after",
+        }:
+            # Signature authentication and terminal-root validity are not
+            # duplicated in the local guard. These validly framed profiles
+            # must reach, and be rejected by, released verification.
             enforce_synthetic_ak_certificate_policy(
                 ak_chain_pem=chain_pem,
                 trusted_roots_pem=trusted_root_pem,
